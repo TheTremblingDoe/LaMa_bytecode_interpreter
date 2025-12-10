@@ -9,6 +9,8 @@
 #include <stdint.h>
 #include <limits.h>
 
+#include "tools/idiom.h"
+#include "tools/decode.h"
 #include "runtime/runtime.h"
 
 #define swap(x,y) do {    \
@@ -18,7 +20,7 @@
    y = _x;                \
  } while(0)
 
-// #define DEBUG
+//#define DEBUG
 
 void *__start_custom_data;
 void *__stop_custom_data;
@@ -1256,9 +1258,75 @@ void eval (bytefile *bf, char *fname) {
 
 int main (int argc, char* argv[]) {
     if (argc < 2) {
-        failure("Usage: %s <bytecode-file>\n", argv[0]);
+        failure("Usage:\n"
+                "  %s program.bc        – execute Lama bytecode\n"
+                "  %s --idioms program.bc – analyze idioms\n",
+                argv[0], argv[0]);
     }
 
+    if (strcmp(argv[1], "--idioms") == 0) {
+        if (argc < 3) failure("Usage: %s --idioms <bytecode-file>\n", argv[0]);
+
+        bytefile* bf = read_file(argv[2]);
+        if (!bf) {
+            failure("Failed to read bytecode file\n");
+        }
+
+        // Собираем точки входа (все публичные символы)
+        uint32_t* entrypoints = malloc((bf->public_symbols_number + 1) * sizeof(uint32_t));
+        if (!entrypoints) {
+            failure("Failed to allocate memory for entrypoints\n");
+        }
+
+        uint32_t entry_count = 0;
+
+        for (int i = 0; i < bf->public_symbols_number; i++) {
+            int offset = get_public_offset(bf, i);
+            if (offset >= 0 && offset < (code_stop_ptr - bf->code_ptr)) {
+                entrypoints[entry_count++] = (uint32_t)offset;
+            }
+        }
+
+        if (entry_count == 0) {
+            // Если нет публичных символов, используем 0 как точку входа
+            entrypoints[entry_count++] = 0;
+        }
+
+        uint32_t code_size = (uint32_t)(code_stop_ptr - bf->code_ptr + 1);
+        const uint8_t* code = (const uint8_t*)bf->code_ptr;
+
+        // Проверяем, что размер корректен
+        if (code_size == 0) {
+            failure("Empty bytecode\n");
+        }
+
+        IdiomList idioms = analyze_idioms(code, code_size, entrypoints, entry_count);
+
+        printf("=== Idiom frequency analysis ===\n");
+        printf("Total idioms found: %u\n", idioms.count);
+        printf("\n");
+
+        for (uint32_t i = 0; i < idioms.count; i++) {
+            if (idioms.idioms[i].occurrences == 0) continue;
+
+            printf("%6u ×  ", idioms.idioms[i].occurrences);
+            for (uint32_t j = 0; j < idioms.idioms[i].len; j++) {
+                printf("%02X ", idioms.idioms[i].bytes[j]);
+            }
+            printf("\n");
+        }
+
+        free_idiom_list(&idioms);
+        free(entrypoints);
+        free(bf->global_ptr);
+        free(bf);
+        return 0;
+    }
+
+//    if (argc < 2) {
+//        failure("Usage: %s <bytecode-file>\n", argv[0]);
+//    }
+//
     bytefile *f = read_file (argv[1]);
     eval (f, argv[1]);
     free(f->global_ptr);

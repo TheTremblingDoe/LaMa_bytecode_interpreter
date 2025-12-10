@@ -12,6 +12,11 @@ if(FORCE_32BIT AND NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -m32")
 endif()
 
+add_library(Tools STATIC
+    tools/decode.c
+    tools/idiom.c
+)
+
 add_library(Runtime STATIC 
     runtime/runtime.c
     runtime/gc_runtime.s
@@ -26,6 +31,15 @@ target_compile_options(Runtime PRIVATE
     -Wextra                 
 )
 
+target_compile_options(Tools PRIVATE
+    -g                      
+    -fstack-protector-all   
+    -Wall                   
+    -Wextra                 
+)
+
+# ← ПРАВИЛЬНО
+target_include_directories(Tools PUBLIC tools)
 target_include_directories(Runtime PUBLIC runtime)
 
 add_executable(lvm lvm.c)
@@ -36,6 +50,9 @@ target_compile_options(lvm PRIVATE
     -Wextra
 )
 
-target_link_libraries(lvm PRIVATE Runtime m)
+target_include_directories(lvm PRIVATE tools runtime)
+
+target_link_libraries(lvm PRIVATE Tools Runtime m)
 
 configure_file(runtime/Std.i ${CMAKE_CURRENT_BINARY_DIR}/Std.i COPYONLY)
+
