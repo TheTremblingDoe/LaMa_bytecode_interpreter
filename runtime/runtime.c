@@ -523,7 +523,6 @@ extern void printValue (void *p) {
 
 static void stringcat (void *p) {
   data *a;
-  unsigned i;
   
   if (UNBOXED(p)) ;
   else {
@@ -606,7 +605,7 @@ extern void* Lsubstring (void *subj, int p, int l) {
   
   failure ("substring: index out of bounds (position=%d, length=%d, \
             subject length=%d)", pp, ll, LEN(d->tag));
-  return BOX(0); // Чтобы избежать warning: control reaches end of non-void function
+  //return BOX(0); // Чтобы избежать warning: control reaches end of non-void function
 }
 
 extern struct re_pattern_buffer *Lregexp (char *regexp) {

@@ -18,7 +18,7 @@
    y = _x;                \
  } while(0)
 
-//#define DEBUG
+// #define DEBUG
 
 void *__start_custom_data;
 void *__stop_custom_data;
@@ -119,7 +119,7 @@ char* get_string (bytefile *f, int pos) {
 /* Gets a name for a public symbol */
 char* get_public_name (bytefile *f, int i) {
     if (i < 0 || i >= f->public_symbols_number) {
-        failure("Public symbol index out of bounds: %d (public_symbols_number: %d)\n", 
+        failure("Public symbol index out of bounds: %d (public_symbols_number: %d)\n",
                 i, f->public_symbols_number);
     }
     return get_string (f, f->public_ptr[i*2]);
@@ -128,7 +128,7 @@ char* get_public_name (bytefile *f, int i) {
 /* Gets an offset for a public symbol */
 int get_public_offset (bytefile *f, int i) {
     if (i < 0 || i >= f->public_symbols_number) {
-        failure("Public symbol index out of bounds: %d (public_symbols_number: %d)\n", 
+        failure("Public symbol index out of bounds: %d (public_symbols_number: %d)\n",
                 i, f->public_symbols_number);
     }
     return f->public_ptr[i*2+1];
@@ -166,12 +166,12 @@ bytefile* read_file (char *fname) {
     if (size == -1) {
         failure ("%s\n", strerror (errno));
     }
-    
+
     // Проверка максимального размера файла
     if (size > INT_MAX - (long)sizeof(int)*4) {
         failure("File too large: %ld bytes (max: %ld)\n", size, INT_MAX - (long)sizeof(int)*4);
     }
-    
+
     rewind (f);
 
     file = (bytefile*) malloc (sizeof(int)*4 + size);
@@ -195,40 +195,40 @@ bytefile* read_file (char *fname) {
     // Проверка, что указатели в пределах выделенной памяти
     size_t buffer_size = sizeof(int)*4 + size;
     char *buffer_end = (char*)file + buffer_size;
-    
+
     // Проверка public_ptr
     size_t public_table_size = file->public_symbols_number * 2 * sizeof(int);
     if ((char*)file->buffer + public_table_size > buffer_end) {
         free(file);
         failure("Public symbols table exceeds file bounds\n");
     }
-    
+
     file->public_ptr = (int*) file->buffer;
     file->string_ptr = &file->buffer[public_table_size];
-    
+
     // Проверка string_ptr
     if (file->string_ptr + file->stringtab_size > buffer_end) {
         free(file);
         failure("String table exceeds file bounds\n");
     }
-    
+
     file->code_ptr = &file->string_ptr[file->stringtab_size];
-    
+
     // Проверка code_ptr
     if (file->code_ptr > buffer_end) {
         free(file);
         failure("Bytecode exceeds file bounds\n");
     }
-    
+
     /* ВАЖНО: сохраняем оригинальную логику вычисления code_stop_ptr */
     code_stop_ptr = file->buffer + (size - 3 * sizeof(int)) - 1;
-    
+
     // Дополнительная проверка code_stop_ptr
     if (code_stop_ptr < file->buffer || code_stop_ptr >= (char*)file + buffer_size) {
         free(file);
         failure("Invalid code_stop_ptr calculation\n");
     }
-    
+
     file->global_ptr = (int*) malloc (file->global_area_size * sizeof (int));
     if (file->global_ptr == NULL && file->global_area_size > 0) {
         free(file);
@@ -299,7 +299,7 @@ static void lama_reallocstack(lama_State *L, int newsize) {
     if (!new_stack) {
         failure("Failed to allocate stack of size %d\n", newsize);
     }
-    
+
     set_gc_ptr(__gc_stack_bottom, new_stack + newsize - 1);
     int shift = stack_bottom - prev_stack_bottom;
     set_gc_ptr(__gc_stack_top, prev_stack_top + shift);
@@ -323,11 +323,11 @@ static void lama_reallocstack(lama_State *L, int newsize) {
             *st_ptr = cast(StkId, *st_ptr) + shift;
         }
     }
-    
+
     lama_CallInfo *ci_ptr;
     foreach_ci(L, ci_ptr)
         ci_ptr->base = ci_ptr->base + shift;
-    
+
     free(prev_stack_last + 1 - prev_stacksize);
 }
 
@@ -358,7 +358,7 @@ static int safe_mod(lama_State *L, bytefile *bf, int a, int b) {
             failure("Modulo by zero at offset %ld: %d %% %d\n",
                    (long)(L->ip - bf->code_ptr - 1), a, b);
     }
-    
+
     int result = a % b;
     if (result < 0) {
         result += (b > 0) ? b : -b;
@@ -407,12 +407,12 @@ typedef enum{
 static void lama_settop(lama_State *L, int idx) {
     if(idx < 0) {
         if (-idx > (L->base - stack_top)) {
-            failure("Stack underflow in lama_settop: idx=%d, available=%ld\n", 
+            failure("Stack underflow in lama_settop: idx=%d, available=%ld\n",
                    idx, (long)(L->base - stack_top));
         }
     } else {
         if (idx > (stack_top - L->stack_last)) {
-            failure("Stack overflow in lama_settop: idx=%d, available=%ld\n", 
+            failure("Stack overflow in lama_settop: idx=%d, available=%ld\n",
                    idx, (long)(stack_top - L->stack_last));
         }
     }
@@ -443,7 +443,7 @@ static unsigned char read_byte(lama_State *L) {
 
 static StkId idx2StkId(lama_State *L, int idx) {
     if (idx > L->base - stack_top) {
-        failure("Stack index out of bounds: idx=%d, available=%ld\n", 
+        failure("Stack index out of bounds: idx=%d, available=%ld\n",
                idx, (long)(L->base - stack_top));
     }
     return stack_top + idx;
@@ -459,21 +459,21 @@ static void check_loc_bounds(lama_State *L, int idx, int max, const char *loc_ty
 
 static void **loc2adr(lama_State *L, lama_Loc loc) {
     int idx = loc.idx;
-    
+
     // Быстрая проверка
     if (idx < 0) {
         goto bounds_error;
     }
-    
+
     int n_caps = L->ci->n_caps;
     int n_args = L->ci->n_args;
     int n_locs = L->ci->n_locs;
-    
+
     const char *type_name = NULL;
     int max = 0;
     int offset = 0;
     void **base_ptr = NULL;
-    
+
     switch (loc.tt) {
         case LOC_G:
             type_name = "global";
@@ -506,7 +506,7 @@ static void **loc2adr(lama_State *L, lama_Loc loc) {
                     loc.tt);
             return NULL;
     }
-    
+
     if (idx >= max) {
         bounds_error:
         failure("Bounds error accessing %s[%d]\n"
@@ -530,7 +530,7 @@ static void **loc2adr(lama_State *L, lama_Loc loc) {
                 offset, base_ptr + offset);
         return NULL;
     }
-    
+
     return base_ptr + offset;
 }
 
@@ -542,7 +542,7 @@ static int lama_tonumber(lama_State *L, int idx) {
         else if (ttisarray(o)) type_desc = "array";
         else if (ttissexp(o)) type_desc = "sexp";
         else if (ttisfunction(o)) type_desc = "function";
-        
+
         failure("Expected number at stack[%d], got %s (address: %p)\n",
                 idx, type_desc, o);
     }
@@ -563,7 +563,7 @@ static void lama_reallocCI(lama_State *L, int newsize) {
     if (!L->base_ci) {
         failure("Failed to allocate CallInfo of size %d\n", newsize);
     }
-    
+
     int shift = L->base_ci - prev_base_ci;
 
     L->size_ci = newsize;
@@ -573,7 +573,7 @@ static void lama_reallocCI(lama_State *L, int newsize) {
     memcpy(L->end_ci + 1,
            prev_end_ci + 1,
            prev_size_ci * sizeof(lama_CallInfo));
-    
+
     free(prev_end_ci + 1 - prev_size_ci);
 }
 
@@ -712,7 +712,7 @@ static void lama_end(lama_State *L) {
     int n_caps = L->ci->n_caps;
     int n_args = L->ci->n_args;
     int n_locs = L->ci->n_locs;
-    
+
     if ((L->base - stack_top) != 1) {
         failure("Stack frame corruption in lama_end: expected 1 value, got %ld\n",
                (long)(L->base - stack_top));
@@ -737,32 +737,32 @@ static char* find_main_entrypoint(bytefile *bf) {
     if (bf->public_symbols_number == 0) {
         failure("No public symbols in bytecode file\n");
     }
-    
+
     for (int i = 0; i < bf->public_symbols_number; i++) {
         char *name = get_public_name(bf, i);
         if (strcmp(name, "main") == 0) {
             int offset = get_public_offset(bf, i);
-            
+
             if (offset < 0) {
                 failure("Invalid offset for 'main': %d (must be >= 0)\n", offset);
             }
-            
+
             if (offset > (code_stop_ptr - bf->code_ptr)) {
                 failure("'main' offset %d exceeds code size %ld\n",
                         offset, (long)(code_stop_ptr - bf->code_ptr));
             }
-            
+
             return bf->code_ptr + offset;
         }
     }
-    
+
     // Вывод первых нескольких символов для помощи
-    fprintf(stderr, "Main not found. Available symbols (%d total):\n", 
+    fprintf(stderr, "Main not found. Available symbols (%d total):\n",
             bf->public_symbols_number);
     for (int i = 0; i < bf->public_symbols_number && i < 10; i++) {
         fprintf(stderr, "  '%s'\n", get_public_name(bf, i));
     }
-    
+
     failure("Required public symbol 'main' not found\n");
     return NULL;
 }
@@ -842,19 +842,19 @@ void eval (bytefile *bf, char *fname) {
         if (L->ip >= L->code_end) {
             failure("Reached end of bytecode without stop opcode\n");
         }
-        
+
         check_ip_bounds(L, 1);
         //char x = read_byte(L), h = (x & 0xF0) >> 4, l = x & 0x0F;
         unsigned char x = read_byte(L);
         unsigned char h = (x & 0xF0) >> 4;
         unsigned char l = x & 0x0F;
-        
+
         /* Макросы для ошибок */
         #define ERROR_AT(fmt, ...) failure("ERROR at offset %ld (0x%lx): " fmt, \
                                             (long)(L->ip - bf->code_ptr - 1), \
                                             (long)(L->ip - bf->code_ptr - 1), \
                                             ##__VA_ARGS__)
-        
+
         #define OPFAIL(fmt, ...) ERROR_AT("invalid opcode %d-%d: " fmt, \
                                             (int)h, (int)l, ##__VA_ARGS__)
 
@@ -884,7 +884,7 @@ void eval (bytefile *bf, char *fname) {
                     case OP_NEQ:    lama_pushnumber(L, lama_numneq(nb,nc)); break;
                     case OP_AND:    lama_pushnumber(L, lama_numand(nb,nc)); break;
                     case OP_OR:     lama_pushnumber(L, lama_numor(nb,nc));  break;
-                    default: 
+                    default:
                         OPFAIL("Invalid binary operation\n");
                 }
                 break;
@@ -963,7 +963,7 @@ void eval (bytefile *bf, char *fname) {
                 print_debug("LD");
                 unsigned char loc_type = l;
                 if (loc_type >= LOC_N) {  // LOC_N = 4
-                    ERROR_AT("Invalid location type for LD: %d (max %d)\n", 
+                    ERROR_AT("Invalid location type for LD: %d (max %d)\n",
                             loc_type, LOC_N - 1);
                 }
                 lama_Loc loc = {read_int(L), (char)loc_type};  // Приведение к char
@@ -1013,13 +1013,13 @@ void eval (bytefile *bf, char *fname) {
                     }
                     case CTRL_BEGIN: {
                         print_debug("BEGIN\n");
-                        
+
                         // Проверяем, что на стеке достаточно элементов
                         if (L->base - stack_top < 2) {
                             ERROR_AT("BEGIN: stack underflow, need 2 values, have %ld\n",
                                     (long)(L->base - stack_top));
                         }
-                        
+
                         int n_caps = lama_tonumber(L, 2);
                         if (n_caps != 0) {
                             void *cap_value = *idx2StkId(L, 2);
@@ -1028,23 +1028,25 @@ void eval (bytefile *bf, char *fname) {
                                     n_caps, cap_value,
                                     UNBOXED(cap_value) ? "unboxed number" : "boxed value");
                         }
-                        
+
                         void *fun = *idx2StkId(L, 1);
                         if(lama_isdummy(L, 1)) {
                             fun = NULL;
-                        } else if (!ttisfunction(fun) && fun != NULL) {
+                        // Leads to ERROR:
+                        // ERROR at offset 0 (0x0): BEGIN: expected function or dummy at stack[1], got `addr` (tag=0)
+                        } /* else if (!ttisfunction(fun) && fun != NULL) {
                             ERROR_AT("BEGIN: expected function or dummy at stack[1], "
                                     "got %p (tag=%d)\n",
                                     fun, !UNBOXED(fun) ? TO_DATA(fun)->tag : -1);
-                        }
-                        
+                        } */
+
                         lama_pop(L, 2);
                         int n_args = read_int(L), n_locs = read_int(L);
-                        
+
                         // Дополнительные проверки аргументов
                         if (n_args < 0) ERROR_AT("BEGIN: negative n_args: %d\n", n_args);
                         if (n_locs < 0) ERROR_AT("BEGIN: negative n_locs: %d\n", n_locs);
-                        
+
                         lama_begin(L, 0, n_args, n_locs, ret_ip, fun);
                         break;
                     }
@@ -1082,7 +1084,7 @@ void eval (bytefile *bf, char *fname) {
                         print_debug("CALLC\n");
                         int n_args = read_int(L);
                         void *fun = *idx2StkId(L, n_args + 1);
-                        
+
                         /* Улучшенная проверка функции */
                         if (!ttisfunction(fun)) {
                             char *type = "unknown/boxed";
@@ -1090,11 +1092,11 @@ void eval (bytefile *bf, char *fname) {
                             else if (ttisstring(fun)) type = "string";
                             else if (ttisarray(fun)) type = "array";
                             else if (ttissexp(fun)) type = "sexp";
-                            
-                            ERROR_AT("CALLC expected function at stack position %d, got %s (value: %p)\n", 
+
+                            ERROR_AT("CALLC expected function at stack position %d, got %s (value: %p)\n",
                                     n_args + 1, type, fun);
                         }
-                        
+
                         for(int i = n_args; i > 0; i--)
                             *idx2StkId(L, i + 1) = *idx2StkId(L, i);
                         lama_pop(L, 1);
@@ -1103,20 +1105,20 @@ void eval (bytefile *bf, char *fname) {
                         lama_push(L, fun);
                         ret_ip = L->ip;
                         char *func_ptr = cast(char**, fun)[0];
-                        
+
                         /* Улучшенная проверка указателя функции */
                         unsigned char first_byte = (unsigned char)*func_ptr;
                         unsigned char func_h = (first_byte & 0xF0) >> 4;
                         unsigned char func_l = first_byte & 0x0F;
-                        
-                        if (func_h != OP_CTRL || 
+
+                        if (func_h != OP_CTRL ||
                             (func_l != CTRL_BEGIN && func_l != CTRL_CBEGIN)) {
                             ERROR_AT("Invalid function pointer in CALLC: opcode %d-%d (0x%02x) at %p, "
                                     "expected %d-{%d,%d}\n",
                                     func_h, func_l, first_byte, func_ptr,
                                     OP_CTRL, CTRL_BEGIN, CTRL_CBEGIN);
                         }
-                        
+
                         L->ip = func_ptr;
                         break;
                     }
@@ -1126,20 +1128,20 @@ void eval (bytefile *bf, char *fname) {
                         check_jump_offset(L, func_offset);
                         int n_args = read_int(L);
                         char *func_ptr = bf->code_ptr + func_offset;
-                        
+
                         /* Улучшенная проверка указателя функции */
                         unsigned char first_byte = (unsigned char)*func_ptr;
                         unsigned char func_h = (first_byte & 0xF0) >> 4;
                         unsigned char func_l = first_byte & 0x0F;
-                        
-                        if (func_h != OP_CTRL || 
+
+                        if (func_h != OP_CTRL ||
                             (func_l != CTRL_BEGIN && func_l != CTRL_CBEGIN)) {
                             ERROR_AT("Invalid function pointer in CALL at offset %d: "
                                     "opcode %d-%d (0x%02x) at %p, expected %d-{%d,%d}\n",
                                     func_offset, func_h, func_l, first_byte, func_ptr,
                                     OP_CTRL, CTRL_BEGIN, CTRL_CBEGIN);
                         }
-                        
+
                         lama_pushnumber(L, 0); //n_caps
                         lama_pushdummy(L);
                         ret_ip = L->ip;
@@ -1256,7 +1258,7 @@ int main (int argc, char* argv[]) {
     if (argc < 2) {
         failure("Usage: %s <bytecode-file>\n", argv[0]);
     }
-    
+
     bytefile *f = read_file (argv[1]);
     eval (f, argv[1]);
     free(f->global_ptr);
