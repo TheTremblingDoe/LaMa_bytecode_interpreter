@@ -12,12 +12,21 @@ if(FORCE_32BIT AND NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -m32")
 endif()
 
+set(HEADER_FILES
+	tools/bytecode_def.h
+	tools/verifier.h
+	runtime/runtime.h
+	tools/decode.h
+	tools/idiom.h
+)
+
 add_library(Tools STATIC
     tools/decode.c
     tools/idiom.c
+    tools/verifier.c
 )
 
-add_library(Runtime STATIC 
+add_library(Runtime STATIC
     runtime/runtime.c
     runtime/gc_runtime.s
 )
