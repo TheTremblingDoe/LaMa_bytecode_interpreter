@@ -1174,7 +1174,7 @@ int main (int argc, char* argv[]) {
         failure("Usage:\n"
                 "  %s program.bc        – execute Lama bytecode\n"
                 "  %s --idioms program.bc – analyze idioms\n",
-		        " %s --verify program.bc - verify bytecode\n",
+		        "  %s --verify program.bc - verify bytecode\n",
                 argv[0], argv[0], argv[0]);
     }
 
@@ -1191,8 +1191,8 @@ int main (int argc, char* argv[]) {
     }
     
     bool verbose = (strcmp(argv[1], "--verify-verbose") == 0);
-    bool ok = verbose ? verify_bytecode_verbose(bf, argv[2]) : 
-                       verify_bytecode(bf, argv[2]);
+    bool ok = verbose ? verify_bytecode_verbose(bf, argv[2], code_stop_ptr) :
+                       verify_bytecode(bf, argv[2], code_stop_ptr);
     
     free(bf->global_ptr);
     free(bf);

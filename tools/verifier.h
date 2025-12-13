@@ -54,11 +54,13 @@ typedef struct {
     
     /* Configuration */
     bool verbose;
+
+    bool *is_instruction_part;  /* Which bytes are part of some instruction */
 } VerifierContext;
 
 /* Public API */
-bool verify_bytecode(bytefile *bf, const char *fname);
-bool verify_bytecode_verbose(bytefile *bf, const char *fname); /* With detailed output */
+bool verify_bytecode(bytefile *bf, const char *fname, const char *code_stop_ptr);
+bool verify_bytecode_verbose(bytefile *bf, const char *fname, const char *code_stop_ptr); /* With detailed output */
 void print_verification_errors(VerifierContext *ctx);
 void free_verifier_context(VerifierContext *ctx);
 
