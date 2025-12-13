@@ -28,51 +28,45 @@ void sigsegv_handler(int sig) {
 #include <signal.h>
 #include <execinfo.h>
 
-/* Теперь можно напрямую обращаться к полям bytefile */
-static const char* get_bf_code_ptr(const bytefile *bf) {
-    if (!bf) {
-        fprintf(stderr, "ERROR: bytefile is NULL\n");
-        return NULL;
-    }
-    return bf->code_ptr;  // Прямой доступ!
-}
+#define MAX_STACK_DEPTH 10000
+#define MAX_FUNCTIONS 1000
+#define MAX_CAPTURES 255
+#define MAX_PARAMS 255
+#define MAX_LOCALS 255
 
-static int get_bf_stringtab_size(const bytefile *bf) {
-    return bf ? bf->stringtab_size : 0;
-}
-
-static int get_bf_global_area_size(const bytefile *bf) {
-    return bf ? bf->global_area_size : 0;
-}
-
-static int get_bf_public_symbols_number(const bytefile *bf) {
-    return bf ? bf->public_symbols_number : 0;
-}
-
-/* Остальные функции остаются аналогичными, но с bytefile вместо bytefile */
+/* Forward declaration */
+static int count_bits(bool *array, int size);
+static void propagate_stack_height(VerifierContext *ctx, int target, int height, 
+                                  int *worklist, int *worklist_size);
+static bool verify_bytecode_internal(bytefile *bf, const char *fname, bool verbose);
 
 /* Initialize verification context */
-static VerifierContext* create_verifier_context(bytefile *bf, const char *fname, int code_size) {
-    VerifierContext *ctx = malloc(sizeof(VerifierContext));
+static VerifierContext* create_verifier_context(bytefile *bf, const char *fname, int code_size, bool verbose) {
+    VerifierContext *ctx = calloc(1, sizeof(VerifierContext));
     if (!ctx) return NULL;
     
     ctx->bf = bf;
-    ctx->fname = (char*)fname;
+    ctx->fname = fname ? strdup(fname) : NULL;
     ctx->error_count = 0;
     ctx->max_errors = 100;
     ctx->max_stack_height = 0;
     ctx->total_instructions = 0;
     ctx->code_size = code_size;
+    ctx->verbose = verbose;
+    ctx->current_function = -1;
     
     /* Allocate maps for control flow analysis */
     ctx->stack_heights = malloc(code_size * sizeof(int));
-    ctx->visited = malloc(code_size * sizeof(bool));
-    ctx->is_jump_target = malloc(code_size * sizeof(bool));
+    ctx->visited = calloc(code_size, sizeof(bool));
+    ctx->is_jump_target = calloc(code_size, sizeof(bool));
+    ctx->is_function_start = calloc(code_size, sizeof(bool));
     
-    if (!ctx->stack_heights || !ctx->visited || !ctx->is_jump_target) {
+    if (!ctx->stack_heights || !ctx->visited || !ctx->is_jump_target || !ctx->is_function_start) {
+        fprintf(stderr, "Failed to allocate memory for verification maps\n");
         free(ctx->stack_heights);
         free(ctx->visited);
         free(ctx->is_jump_target);
+        free(ctx->is_function_start);
         free(ctx);
         return NULL;
     }
@@ -80,18 +74,13 @@ static VerifierContext* create_verifier_context(bytefile *bf, const char *fname,
     /* Initialize stack heights to -1 (unreachable) */
     for (int i = 0; i < code_size; i++) {
         ctx->stack_heights[i] = -1;
-        ctx->visited[i] = false;
-        ctx->is_jump_target[i] = false;
     }
     
+    /* Allocate function array */
+    ctx->functions = malloc(MAX_FUNCTIONS * sizeof(FunctionInfo));
+    ctx->function_count = 0;
+    
     ctx->errors = malloc(ctx->max_errors * sizeof(VerificationError));
-    if (!ctx->errors) {
-        free(ctx->stack_heights);
-        free(ctx->visited);
-        free(ctx->is_jump_target);
-        free(ctx);
-        return NULL;
-    }
     
     return ctx;
 }
@@ -99,47 +88,106 @@ static VerifierContext* create_verifier_context(bytefile *bf, const char *fname,
 /* Report a verification error */
 static void report_error(VerifierContext *ctx, int offset, const char *fmt, ...) {
     if (ctx->error_count >= ctx->max_errors) {
-        /* Resize error array */
         ctx->max_errors *= 2;
-        VerificationError *new_errors = realloc(ctx->errors, ctx->max_errors * sizeof(VerificationError));
+        VerificationError *new_errors = realloc(ctx->errors, 
+                                               ctx->max_errors * sizeof(VerificationError));
         if (!new_errors) return;
         ctx->errors = new_errors;
     }
     
     VerificationError *err = &ctx->errors[ctx->error_count++];
     err->offset = offset;
-    err->line = 0;
+    err->line = 0;  /* Would need debug info */
     err->column = 0;
     
-    /* Format message */
+    char buffer[1024];
     va_list args;
     va_start(args, fmt);
-    
-    /* Determine needed size */
-    va_list args_copy;
-    va_copy(args_copy, args);
-    int size = vsnprintf(NULL, 0, fmt, args_copy) + 1;
-    va_end(args_copy);
-    
-    err->message = malloc(size);
-    if (err->message) {
-        vsnprintf(err->message, size, fmt, args);
-    }
-    
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
+    
+    err->message = strdup(buffer);
+}
+
+/* Get instruction name for debugging */
+const char* get_opcode_name(unsigned char opcode, unsigned char subop) {
+    static char buffer[32];
+    
+    switch (opcode) {
+        case OP_HALT: return "HALT";
+        case OP_BINOP:
+            switch (subop) {
+                case 1: return "ADD"; case 2: return "SUB"; case 3: return "MUL";
+                case 4: return "DIV"; case 5: return "MOD"; case 6: return "LT";
+                case 7: return "LE"; case 8: return "GT"; case 9: return "GE";
+                case 10: return "EQ"; case 11: return "NEQ"; case 12: return "AND";
+                case 13: return "OR"; default: return "BINOP?";
+            }
+        case OP_PRIMARY:
+            switch (subop) {
+                case PRIMARY_CONST: return "CONST";
+                case PRIMARY_STRING: return "STRING";
+                case PRIMARY_SEXP: return "SEXP";
+                case PRIMARY_STA: return "STA";
+                case PRIMARY_JMP: return "JMP";
+                case PRIMARY_END: return "END";
+                case PRIMARY_DROP: return "DROP";
+                case PRIMARY_DUP: return "DUP";
+                case PRIMARY_SWAP: return "SWAP";
+                case PRIMARY_ELEM: return "ELEM";
+                default: return "PRIMARY?";
+            }
+        case OP_LD: return "LD";
+        case OP_LDA: return "LDA";
+        case OP_ST: return "ST";
+        case OP_CTRL:
+            switch (subop) {
+                case CTRL_CJMPz: return "CJMPz";
+                case CTRL_CJMPnz: return "CJMPnz";
+                case CTRL_BEGIN: return "BEGIN";
+                case CTRL_CBEGIN: return "CBEGIN";
+                case CTRL_CLOSURE: return "CLOSURE";
+                case CTRL_CALLC: return "CALLC";
+                case CTRL_CALL: return "CALL";
+                case CTRL_TAG: return "TAG";
+                case CTRL_ARRAY: return "ARRAY";
+                case CTRL_FAIL: return "FAIL";
+                case CTRL_LINE: return "LINE";
+                default: return "CTRL?";
+            }
+        case OP_PATT:
+            switch (subop) {
+                case PATT_STR: return "PATT_STR";
+                case PATT_STRING_TAG: return "PATT_STRING";
+                case PATT_ARRAY_TAG: return "PATT_ARRAY";
+                case PATT_SEXP_TAG: return "PATT_SEXP";
+                case PATT_REF: return "PATT_REF";
+                case PATT_VAL: return "PATT_VAL";
+                case PATT_FUN: return "PATT_FUN";
+                default: return "PATT?";
+            }
+        case OP_BUILTIN:
+            switch (subop) {
+                case BUILTIN_READ: return "READ";
+                case BUILTIN_WRITE: return "WRITE";
+                case BUILTIN_LENGTH: return "LENGTH";
+                case BUILTIN_STRING: return "TOSTRING";
+                case BUILTIN_ARRAY: return "ARRAY";
+                default: return "BUILTIN?";
+            }
+        default:
+            snprintf(buffer, sizeof(buffer), "UNK(0x%02x)", (opcode << 4) | subop);
+            return buffer;
+    }
 }
 
 /* Get instruction size in bytes */
 int get_instruction_size(unsigned char opcode, unsigned char subop, const char *ip) {
-    (void)ip;  /* Подавляем warning о неиспользуемом параметре */
+    (void)ip;
     
     switch (opcode) {
-        case OP_HALT:
-            return 1;
-            
-        case OP_BINOP:
-            return 1;
-            
+        case OP_HALT: return 1;
+        case OP_BINOP: return 1;
         case OP_PRIMARY:
             switch (subop) {
                 case PRIMARY_CONST:
@@ -147,23 +195,13 @@ int get_instruction_size(unsigned char opcode, unsigned char subop, const char *
                 case PRIMARY_SEXP:
                 case PRIMARY_JMP:
                     return 1 + sizeof(int);
-                case PRIMARY_STA:
-                    return 1;
-                case PRIMARY_END:
-                case PRIMARY_DROP:
-                case PRIMARY_DUP:
-                case PRIMARY_SWAP:
-                case PRIMARY_ELEM:
-                    return 1;
                 default:
                     return 1;
             }
-            
         case OP_LD:
         case OP_LDA:
         case OP_ST:
             return 1 + sizeof(int);
-            
         case OP_CTRL:
             switch (subop) {
                 case CTRL_CJMPz:
@@ -181,10 +219,7 @@ int get_instruction_size(unsigned char opcode, unsigned char subop, const char *
                 default:
                     return 1;
             }
-            
-        case OP_PATT:
-            return 1;
-            
+        case OP_PATT: return 1;
         case OP_BUILTIN:
             switch (subop) {
                 case BUILTIN_ARRAY:
@@ -192,20 +227,16 @@ int get_instruction_size(unsigned char opcode, unsigned char subop, const char *
                 default:
                     return 1;
             }
-            
         default:
             return 1;
     }
 }
 
-/* Get stack effect of an instruction (pops - pushes) */
-int get_stack_effect(unsigned char opcode, unsigned char subop, const char *ip) {
+/* Get stack effect with context for functions */
+int get_stack_effect(unsigned char opcode, unsigned char subop, const char *ip, VerifierContext *ctx) {
     switch (opcode) {
-        case OP_HALT:
-            return 0;
-            
-        case OP_BINOP:
-            return 1;  /* Pops 2, pushes 1 */
+        case OP_HALT: return 0;
+        case OP_BINOP: return 1;  /* Pops 2, pushes 1 */
             
         case OP_PRIMARY:
             switch (subop) {
@@ -213,10 +244,9 @@ int get_stack_effect(unsigned char opcode, unsigned char subop, const char *ip) 
                 case PRIMARY_STRING:
                     return -1;  /* Pushes 1 */
                 case PRIMARY_SEXP:
-                    /* Pops n, pushes 1 */
                     if (ip) {
                         int n = *(const int*)(ip + 1 + sizeof(int));
-                        return n - 1;
+                        return n - 1;  /* Pops n, pushes 1 */
                     }
                     return 0;
                 case PRIMARY_STA:
@@ -224,11 +254,16 @@ int get_stack_effect(unsigned char opcode, unsigned char subop, const char *ip) 
                 case PRIMARY_JMP:
                     return 0;
                 case PRIMARY_END:
-                    return 1;  /* Pops 1 */
+                    if (ctx && ctx->current_function >= 0) {
+                        /* END pops return value and restores frame */
+                        FunctionInfo *func = &ctx->functions[ctx->current_function];
+                        return 1 + func->params + func->locals + func->captures;
+                    }
+                    return 1;  /* Pops 1 (return value) */
                 case PRIMARY_DROP:
-                    return 1;
+                    return 1;  /* Pops 1 */
                 case PRIMARY_DUP:
-                    return -1;  /* Pops 1, pushes 2 */
+                    return -1; /* Pops 1, pushes 2 */
                 case PRIMARY_SWAP:
                     return 0;  /* Pops 2, pushes 2 */
                 case PRIMARY_ELEM:
@@ -237,14 +272,9 @@ int get_stack_effect(unsigned char opcode, unsigned char subop, const char *ip) 
                     return 0;
             }
             
-        case OP_LD:
-            return -1;  /* Pushes 1 */
-            
-        case OP_LDA:
-            return -2;  /* Pushes 2 (address + dummy) */
-            
-        case OP_ST:
-            return 0;  /* Pops 1, pushes nothing */
+        case OP_LD: return -1;  /* Pushes 1 */
+        case OP_LDA: return -2; /* Pushes 2 (address + dummy) */
+        case OP_ST: return 0;   /* Pops 1 */
             
         case OP_CTRL:
             switch (subop) {
@@ -255,26 +285,24 @@ int get_stack_effect(unsigned char opcode, unsigned char subop, const char *ip) 
                 case CTRL_CBEGIN:
                     return 2;  /* Pops 2 (n_caps + function) */
                 case CTRL_CLOSURE:
-                    return -1;  /* Pushes 1 */
+                    return -1; /* Pushes 1 */
                 case CTRL_CALLC:
-                    /* Pops n_args + 1 (function), pushes 1 */
                     if (ip) {
                         int n_args = *(const int*)(ip + 1);
-                        return n_args;
+                        return n_args;  /* Pops n_args + 1, pushes 1 */
                     }
                     return 0;
                 case CTRL_CALL:
-                    /* Pops n_args, pushes 1 */
                     if (ip) {
                         int n_args = *(const int*)(ip + 1 + sizeof(int));
-                        return n_args - 1;
+                        return n_args - 1;  /* Pops n_args, pushes 1 */
                     }
                     return 0;
                 case CTRL_TAG:
                 case CTRL_ARRAY:
-                    return 0;
+                    return 0;  /* Pops 1, pushes 1 */
                 case CTRL_FAIL:
-                    return 1;
+                    return 1;  /* Pops 1 */
                 case CTRL_LINE:
                     return 0;
                 default:
@@ -284,31 +312,24 @@ int get_stack_effect(unsigned char opcode, unsigned char subop, const char *ip) 
         case OP_PATT:
             switch (subop) {
                 case PATT_STR:
-                    return 1;
-                case PATT_STRING_TAG:
-                case PATT_ARRAY_TAG:
-                case PATT_SEXP_TAG:
-                case PATT_REF:
-                case PATT_VAL:
-                case PATT_FUN:
-                    return 0;
+                    return 1;  /* Pops 2, pushes 1 */
                 default:
-                    return 0;
+                    return 0;  /* Pops 1, pushes 1 */
             }
             
         case OP_BUILTIN:
             switch (subop) {
                 case BUILTIN_READ:
-                    return -1;
+                    return -1; /* Pushes 1 */
                 case BUILTIN_WRITE:
-                    return 0;
+                    return 0;  /* Pops 1, pushes 1 */
                 case BUILTIN_LENGTH:
                 case BUILTIN_STRING:
-                    return 0;
+                    return 0;  /* Pops 1, pushes 1 */
                 case BUILTIN_ARRAY:
                     if (ip) {
                         int n = *(const int*)(ip + 1);
-                        return n - 1;
+                        return n - 1;  /* Pops n, pushes 1 */
                     }
                     return 0;
                 default:
@@ -320,170 +341,166 @@ int get_stack_effect(unsigned char opcode, unsigned char subop, const char *ip) 
     }
 }
 
-/* Check if instruction affects control flow */
-bool is_control_flow_instruction(unsigned char opcode, unsigned char subop) {
-    if (opcode == OP_PRIMARY && subop == PRIMARY_JMP) return true;
-    if (opcode == OP_CTRL) {
-        return (subop == CTRL_CJMPz || subop == CTRL_CJMPnz ||
-                subop == CTRL_BEGIN || subop == CTRL_CBEGIN ||
-                subop == CTRL_CALLC || subop == CTRL_CALL);
-    }
-    return false;
+/* Check if instruction is a function start */
+bool is_function_start_instruction(unsigned char opcode, unsigned char subop) {
+    return (opcode == OP_CTRL && (subop == CTRL_BEGIN || subop == CTRL_CBEGIN));
 }
 
-/* Check if instruction terminates basic block */
-bool is_terminator_instruction(unsigned char opcode, unsigned char subop) {
-    if (opcode == OP_HALT) return true;
-    if (opcode == OP_PRIMARY && subop == PRIMARY_JMP) return true;
-    if (opcode == OP_CTRL && 
-        (subop == CTRL_CJMPz || subop == CTRL_CJMPnz || 
-         subop == CTRL_BEGIN || subop == CTRL_CBEGIN ||
-         subop == CTRL_CALLC || subop == CTRL_CALL ||
-         subop == CTRL_FAIL || subop == PRIMARY_END)) {
-        return true;
-    }
-    return false;
+/* Read integer from bytecode at offset */
+static int read_int_at(const char *ip, int offset) {
+    return *(const int*)(ip + offset);
 }
 
-/* Verify individual instruction encoding */
-static bool verify_instruction_at(VerifierContext *ctx, const char *ip, int offset) {
-    unsigned char x = (unsigned char)*ip;
-    unsigned char h = (x & 0xF0) >> 4;
-    unsigned char l = x & 0x0F;
+/* Phase 1: Verify instruction encoding */
+bool verify_instruction_encoding(VerifierContext *ctx) {
+    const char *code_start = ctx->bf->code_ptr;
+    int offset = 0;
+    int errors = 0;
     
-    /* Check for valid opcode prefix */
-    if (h > OP_BUILTIN && h != OP_HALT) {
-        report_error(ctx, offset, "Invalid opcode prefix: %d", h);
-        return false;
+    if (ctx->verbose) {
+        printf("\n=== Phase 1: Instruction Encoding Verification ===\n");
     }
     
-    /* Instruction-specific validation */
-    switch (h) {
-        case OP_PRIMARY:
-            if (l > PRIMARY_ELEM) {
-                report_error(ctx, offset, "Invalid primary opcode: %d", l);
-                return false;
-            }
+    while (offset < ctx->code_size) {
+        if (offset < 0 || offset >= ctx->code_size) {
+            report_error(ctx, offset, "Invalid offset");
             break;
-            
-        case OP_LD:
-        case OP_LDA:
-        case OP_ST:
-            if (l >= LOC_N) {
-                report_error(ctx, offset, "Invalid location type: %d", l);
-                return false;
-            }
-            break;
-            
-        case OP_CTRL:
-            if (l > CTRL_LINE) {
-                report_error(ctx, offset, "Invalid control opcode: %d", l);
-                return false;
-            }
-            break;
-            
-        case OP_PATT:
-            if (l > PATT_FUN) {
-                report_error(ctx, offset, "Invalid pattern opcode: %d", l);
-                return false;
-            }
-            break;
-            
-        case OP_BUILTIN:
-            if (l > BUILTIN_ARRAY) {
-                report_error(ctx, offset, "Invalid builtin opcode: %d", l);
-                return false;
-            }
-            break;
-    }
-    
-    /* Validate instruction fits within code */
-    int size = get_instruction_size(h, l, ip);
-    if (offset + size > ctx->code_size) {
-        report_error(ctx, offset, "Instruction extends beyond code boundary");
-        return false;
-    }
-    
-    /* Validate immediate values */
-    if (h == OP_PRIMARY && l == PRIMARY_STRING) {
-        int str_idx = *(const int*)(ip + 1);
-        if (str_idx < 0 || str_idx >= get_bf_stringtab_size(ctx->bf)) {
-            report_error(ctx, offset, "String index out of bounds: %d", str_idx);
-            return false;
-        }
-    }
-    
-    /* Validate jumps */
-    if ((h == OP_PRIMARY && l == PRIMARY_JMP) ||
-        (h == OP_CTRL && (l == CTRL_CJMPz || l == CTRL_CJMPnz))) {
-        int jump_offset = *(const int*)(ip + 1);
-        int target = offset + 1 + sizeof(int) + jump_offset;
-        
-        if (target < 0 || target >= ctx->code_size) {
-            report_error(ctx, offset, "Jump target out of bounds: %d (target=%d, code_size=%d)", 
-                        jump_offset, target, ctx->code_size);
-            return false;
         }
         
-        /* Mark target as a jump target */
-        ctx->is_jump_target[target] = true;
-    }
-    
-    /* Validate variable references */
-    if (h == OP_LD || h == OP_LDA || h == OP_ST) {
-        int idx = *(const int*)(ip + 1);
-        if (idx < 0) {
-            report_error(ctx, offset, "Negative variable index: %d", idx);
-            return false;
+        const char *ip = code_start + offset;
+        unsigned char x = (unsigned char)*ip;
+        unsigned char h = (x & 0xF0) >> 4;
+        unsigned char l = x & 0x0F;
+        
+        /* Check opcode validity */
+        if (h > OP_BUILTIN && h != OP_HALT) {
+            report_error(ctx, offset, "Invalid opcode prefix: 0x%02x", x);
+            errors++;
         }
+        
+        /* Check instruction fits in code */
+        int size = get_instruction_size(h, l, ip);
+        if (size <= 0) {
+            report_error(ctx, offset, "Invalid instruction size: %d", size);
+            errors++;
+            break;
+        }
+        
+        if (offset + size > ctx->code_size) {
+            report_error(ctx, offset, "Instruction extends beyond code boundary");
+            errors++;
+            break;
+        }
+        
+        /* Validate immediate operands */
+        if (h == OP_PRIMARY && l == PRIMARY_STRING) {
+            int str_idx = read_int_at(ip, 1);
+            if (str_idx < 0 || str_idx >= ctx->bf->stringtab_size) {
+                report_error(ctx, offset, "String index out of bounds: %d (max %d)", 
+                           str_idx, ctx->bf->stringtab_size);
+                errors++;
+            }
+        }
+        
+        /* Validate jumps */
+        if ((h == OP_PRIMARY && l == PRIMARY_JMP) ||
+            (h == OP_CTRL && (l == CTRL_CJMPz || l == CTRL_CJMPnz))) {
+            int jump_offset = read_int_at(ip, 1);
+            int target = offset + 1 + sizeof(int) + jump_offset;
+            
+            if (target < 0 || target >= ctx->code_size) {
+                report_error(ctx, offset, "Jump target out of bounds: %d -> %d", 
+                           jump_offset, target);
+                errors++;
+            } else {
+                ctx->is_jump_target[target] = true;
+            }
+        }
+        
+        /* Validate CALL/CALLC targets */
+        if (h == OP_CTRL && (l == CTRL_CALL || l == CTRL_CALLC || l == CTRL_CLOSURE)) {
+            int target = read_int_at(ip, 1);
+            if (target < 0 || target >= ctx->code_size) {
+                report_error(ctx, offset, "Call target out of bounds: %d", target);
+                errors++;
+            } else {
+                /* Mark as function start if BEGIN/CBEGIN */
+                if (target < ctx->code_size) {
+                    unsigned char target_op = (unsigned char)code_start[target];
+                    unsigned char target_h = (target_op & 0xF0) >> 4;
+                    unsigned char target_l = target_op & 0x0F;
+                    if (target_h == OP_CTRL && 
+                        (target_l == CTRL_BEGIN || target_l == CTRL_CBEGIN)) {
+                        ctx->is_function_start[target] = true;
+                    }
+                }
+            }
+        }
+        
+        /* Validate variable indices */
+        if (h == OP_LD || h == OP_LDA || h == OP_ST) {
+            int idx = read_int_at(ip, 1);
+            if (idx < 0) {
+                report_error(ctx, offset, "Negative variable index: %d", idx);
+                errors++;
+            }
+        }
+        
+        /* Mark function starts */
+        if (is_function_start_instruction(h, l)) {
+            ctx->is_function_start[offset] = true;
+        }
+        
+        offset += size;
+        ctx->total_instructions++;
     }
     
-    return true;
+    if (ctx->verbose) {
+        printf("Processed %d instructions\n", ctx->total_instructions);
+        printf("Found %d function start points\n", 
+               count_bits(ctx->is_function_start, ctx->code_size));
+        printf("Found %d jump targets\n", 
+               count_bits(ctx->is_jump_target, ctx->code_size));
+        printf("Encoding errors: %d\n", errors);
+    }
+    
+    return errors == 0;
 }
 
-/* Perform control flow analysis */
-static bool analyze_control_flow(VerifierContext *ctx) {
-    const char *code_start = get_bf_code_ptr(ctx->bf);
-    int code_size = ctx->code_size;
-    
-    /* Worklist for reachability analysis */
-    int *worklist = malloc(code_size * sizeof(int));
-    if (!worklist) {
-        report_error(ctx, 0, "Failed to allocate worklist");
-        return false;
+/* Helper to count true bits in bool array */
+static int count_bits(bool *array, int size) {
+    int count = 0;
+    for (int i = 0; i < size; i++) {
+        if (array[i]) count++;
     }
-    
+    return count;
+}
+
+/* Phase 2: Control flow and stack analysis */
+bool verify_control_flow(VerifierContext *ctx) {
+    const char *code_start = ctx->bf->code_ptr;
+    int *worklist = malloc(ctx->code_size * sizeof(int));
     int worklist_size = 0;
+    int errors = 0;
     
-    /* Start from main entry point (assuming offset 0) */
+    if (ctx->verbose) {
+        printf("\n=== Phase 2: Control Flow Analysis ===\n");
+    }
+    
+    /* Start from main (offset 0) */
     worklist[worklist_size++] = 0;
     ctx->stack_heights[0] = 0;
+    ctx->visited[0] = true;
     
     while (worklist_size > 0) {
         int offset = worklist[--worklist_size];
-        
-        if (ctx->visited[offset]) {
-            continue;
-        }
-        ctx->visited[offset] = true;
-        
         const char *ip = code_start + offset;
-        
-        if (offset >= code_size) {
-            report_error(ctx, offset, "Fell off end of code");
-            free(worklist);
-            return false;
-        }
         
         unsigned char x = (unsigned char)*ip;
         unsigned char h = (x & 0xF0) >> 4;
         unsigned char l = x & 0x0F;
         
-        /* Get current stack height */
         int current_height = ctx->stack_heights[offset];
-        if (current_height < 0) {
-            continue;
-        }
         
         /* Update max stack height */
         if (current_height > ctx->max_stack_height) {
@@ -491,68 +508,47 @@ static bool analyze_control_flow(VerifierContext *ctx) {
         }
         
         /* Check stack underflow */
-        int stack_effect = get_stack_effect(h, l, ip);
+        int stack_effect = get_stack_effect(h, l, ip, ctx);
         int pops = -stack_effect > 0 ? -stack_effect : 0;
         
         if (current_height < pops) {
             report_error(ctx, offset, 
-                        "Stack underflow: need %d values, have %d", 
-                        pops, current_height);
-            free(worklist);
-            return false;
+                        "Stack underflow: need %d values, have %d at %s", 
+                        pops, current_height, get_opcode_name(h, l));
+            errors++;
         }
         
-        /* Calculate new stack height */
         int new_height = current_height + stack_effect;
+        
+        if (new_height > MAX_STACK_DEPTH) {
+            report_error(ctx, offset, "Stack overflow: height %d exceeds limit %d",
+                        new_height, MAX_STACK_DEPTH);
+            errors++;
+        }
         
         /* Handle control flow */
         if (h == OP_PRIMARY && l == PRIMARY_JMP) {
             /* Unconditional jump */
-            int jump_offset = *(const int*)(ip + 1);
+            int jump_offset = read_int_at(ip, 1);
             int target = offset + 1 + sizeof(int) + jump_offset;
             
-            if (target >= 0 && target < code_size) {
-                if (ctx->stack_heights[target] == -1) {
-                    ctx->stack_heights[target] = new_height;
-                } else if (ctx->stack_heights[target] != new_height) {
-                    report_error(ctx, offset,
-                                "Stack height mismatch at jump target: %d vs %d",
-                                ctx->stack_heights[target], new_height);
-                }
-                worklist[worklist_size++] = target;
+            if (target >= 0 && target < ctx->code_size) {
+                propagate_stack_height(ctx, target, new_height, worklist, &worklist_size);
             }
             continue;
         }
         else if (h == OP_CTRL && (l == CTRL_CJMPz || l == CTRL_CJMPnz)) {
-            /* Conditional jump */
-            int jump_offset = *(const int*)(ip + 1);
+            /* Conditional jump - both successors */
+            int jump_offset = read_int_at(ip, 1);
             int target = offset + 1 + sizeof(int) + jump_offset;
+            int fallthrough = offset + get_instruction_size(h, l, ip);
             
-            /* Add both successors */
-            int next_offset = offset + get_instruction_size(h, l, ip);
-            
-            if (target >= 0 && target < code_size) {
-                if (ctx->stack_heights[target] == -1) {
-                    ctx->stack_heights[target] = new_height;
-                } else if (ctx->stack_heights[target] != new_height) {
-                    report_error(ctx, offset,
-                                "Stack height mismatch at jump target: %d vs %d",
-                                ctx->stack_heights[target], new_height);
-                }
-                worklist[worklist_size++] = target;
+            if (target >= 0 && target < ctx->code_size) {
+                propagate_stack_height(ctx, target, new_height, worklist, &worklist_size);
             }
-            
-            if (next_offset < code_size) {
-                if (ctx->stack_heights[next_offset] == -1) {
-                    ctx->stack_heights[next_offset] = new_height;
-                } else if (ctx->stack_heights[next_offset] != new_height) {
-                    report_error(ctx, offset,
-                                "Stack height mismatch at fall-through: %d vs %d",
-                                ctx->stack_heights[next_offset], new_height);
-                }
-                worklist[worklist_size++] = next_offset;
+            if (fallthrough < ctx->code_size) {
+                propagate_stack_height(ctx, fallthrough, new_height, worklist, &worklist_size);
             }
-            
             continue;
         }
         else if (h == OP_PRIMARY && l == PRIMARY_END) {
@@ -564,215 +560,449 @@ static bool analyze_control_flow(VerifierContext *ctx) {
             continue;
         }
         else {
-            /* Normal instruction - continue to next */
-            int next_offset = offset + get_instruction_size(h, l, ip);
-            if (next_offset < code_size) {
-                if (ctx->stack_heights[next_offset] == -1) {
-                    ctx->stack_heights[next_offset] = new_height;
-                } else if (ctx->stack_heights[next_offset] != new_height) {
-                    report_error(ctx, offset,
-                                "Stack height mismatch: %d vs %d",
-                                ctx->stack_heights[next_offset], new_height);
-                }
-                worklist[worklist_size++] = next_offset;
+            /* Normal fall-through */
+            int next = offset + get_instruction_size(h, l, ip);
+            if (next < ctx->code_size) {
+                propagate_stack_height(ctx, next, new_height, worklist, &worklist_size);
+            }
+        }
+    }
+    
+    /* Check for unreachable code */
+    for (int i = 0; i < ctx->code_size; i++) {
+        if (!ctx->visited[i] && code_start[i] != 0) {
+            /* Check if it's a function start (might be called) */
+            if (!ctx->is_function_start[i]) {
+                report_error(ctx, i, "Unreachable code");
+                errors++;
             }
         }
     }
     
     free(worklist);
     
-    /* Check for unreachable code */
-    for (int i = 0; i < code_size; i++) {
-        if (!ctx->visited[i] && code_start[i] != 0) {
-            report_error(ctx, i, "Unreachable code");
-        }
+    if (ctx->verbose) {
+        printf("Maximum stack depth: %d\n", ctx->max_stack_height);
+        printf("Reachable instructions: %d/%d\n", 
+               count_bits(ctx->visited, ctx->code_size), ctx->total_instructions);
+        printf("Control flow errors: %d\n", errors);
     }
     
-    return true;
+    return errors == 0;
 }
 
-/* Verify variable references are in bounds */
-bool verify_variable_references(VerifierContext *ctx) {
-    const char *ip = get_bf_code_ptr(ctx->bf);
-    int offset = 0;
-    int code_size = ctx->code_size;
+/* Propagate stack height to target */
+static void propagate_stack_height(VerifierContext *ctx, int target, int height, 
+                                  int *worklist, int *worklist_size) {
+    if (ctx->stack_heights[target] == -1) {
+        ctx->stack_heights[target] = height;
+    } else if (ctx->stack_heights[target] != height) {
+        report_error(ctx, target, 
+                    "Stack height mismatch: %d vs %d at merge point",
+                    ctx->stack_heights[target], height);
+    }
     
-    while (offset < code_size) {
+    if (!ctx->visited[target]) {
+        ctx->visited[target] = true;
+        worklist[(*worklist_size)++] = target;
+    }
+}
+
+/* Phase 3: Verify variable references */
+bool verify_variable_references(VerifierContext *ctx) {
+    const char *code_start = ctx->bf->code_ptr;
+    int offset = 0;
+    int errors = 0;
+    
+    if (ctx->verbose) {
+        printf("\n=== Phase 3: Variable Reference Verification ===\n");
+    }
+    
+    while (offset < ctx->code_size) {
+        const char *ip = code_start + offset;
         unsigned char x = (unsigned char)*ip;
         unsigned char h = (x & 0xF0) >> 4;
         unsigned char l = x & 0x0F;
         
         if (h == OP_LD || h == OP_LDA || h == OP_ST) {
-            int var_index = *(const int*)(ip + 1);
-            unsigned char loc_type = l;
+            int idx = read_int_at(ip, 1);
             
-            if (var_index < 0) {
-                report_error(ctx, offset, "Negative variable index: %d", var_index);
-            }
-            
-            switch (loc_type) {
-                case LOC_G:  /* Global */
-                    if (var_index >= get_bf_global_area_size(ctx->bf)) {
-                        report_error(ctx, offset, 
-                                    "Global index out of bounds: %d >= %d",
-                                    var_index, get_bf_global_area_size(ctx->bf));
+            switch (l) {
+                case LOC_G: /* Global */
+                    if (idx >= ctx->bf->global_area_size) {
+                        report_error(ctx, offset,
+                                    "Global index %d out of bounds (max %d)",
+                                    idx, ctx->bf->global_area_size);
+                        errors++;
                     }
                     break;
                     
-                case LOC_L:  /* Local */
-                case LOC_A:  /* Argument */
-                case LOC_C:  /* Capture */
-                    /* Более сложная проверка требует контекста функции */
+                case LOC_L: /* Local */
+                    if (ctx->current_function >= 0) {
+                        FunctionInfo *func = &ctx->functions[ctx->current_function];
+                        if (idx >= func->locals) {
+                            report_error(ctx, offset,
+                                        "Local index %d out of bounds (max %d)",
+                                        idx, func->locals);
+                            errors++;
+                        }
+                    }
+                    break;
+                    
+                case LOC_A: /* Argument */
+                    if (ctx->current_function >= 0) {
+                        FunctionInfo *func = &ctx->functions[ctx->current_function];
+                        if (idx >= func->params) {
+                            report_error(ctx, offset,
+                                        "Argument index %d out of bounds (max %d)",
+                                        idx, func->params);
+                            errors++;
+                        }
+                    }
+                    break;
+                    
+                case LOC_C: /* Capture */
+                    if (ctx->current_function >= 0) {
+                        FunctionInfo *func = &ctx->functions[ctx->current_function];
+                        if (!func->is_closure) {
+                            report_error(ctx, offset,
+                                        "Cannot access captures in non-closure function");
+                            errors++;
+                        } else if (idx >= func->captures) {
+                            report_error(ctx, offset,
+                                        "Capture index %d out of bounds (max %d)",
+                                        idx, func->captures);
+                            errors++;
+                        }
+                    }
                     break;
             }
         }
         
-        /* Move to next instruction */
-        int size = get_instruction_size(h, l, ip);
-        if (size <= 0) {
-            report_error(ctx, offset, "Invalid instruction size");
-            break;
-        }
-        
-        offset += size;
-        ip += size;
+        offset += get_instruction_size(h, l, ip);
     }
     
-    return ctx->error_count == 0;
+    if (ctx->verbose) {
+        printf("Variable reference errors: %d\n", errors);
+    }
+    
+    return errors == 0;
+}
+
+/* Phase 4: Verify function calls */
+bool verify_function_calls(VerifierContext *ctx) {
+    const char *code_start = ctx->bf->code_ptr;
+    int offset = 0;
+    int errors = 0;
+    
+    if (ctx->verbose) {
+        printf("\n=== Phase 4: Function Call Verification ===\n");
+    }
+    
+    /* First pass: collect function information */
+    offset = 0;
+    while (offset < ctx->code_size) {
+        if (ctx->is_function_start[offset]) {
+            const char *ip = code_start + offset;
+            unsigned char x = (unsigned char)*ip;
+            unsigned char l = x & 0x0F;
+            
+            if (ctx->function_count >= MAX_FUNCTIONS) {
+                report_error(ctx, offset, "Too many functions (max %d)", MAX_FUNCTIONS);
+                break;
+            }
+            
+            FunctionInfo *func = &ctx->functions[ctx->function_count++];
+            func->address = offset;
+            func->is_closure = (l == CTRL_CBEGIN);
+            
+            /* Read params and locals */
+            func->params = read_int_at(ip, 1 + sizeof(int));
+            func->locals = read_int_at(ip, 1 + 2 * sizeof(int));
+            
+            if (func->is_closure) {
+                /* For CBEGIN, first int is n_caps */
+                func->captures = read_int_at(ip, 1);
+            } else {
+                func->captures = 0;
+            }
+            
+            if (func->params > MAX_PARAMS) {
+                report_error(ctx, offset, "Too many parameters: %d (max %d)",
+                            func->params, MAX_PARAMS);
+                errors++;
+            }
+            if (func->locals > MAX_LOCALS) {
+                report_error(ctx, offset, "Too many locals: %d (max %d)",
+                            func->locals, MAX_LOCALS);
+                errors++;
+            }
+            if (func->captures > MAX_CAPTURES) {
+                report_error(ctx, offset, "Too many captures: %d (max %d)",
+                            func->captures, MAX_CAPTURES);
+                errors++;
+            }
+        }
+        
+        /* Skip to next instruction */
+        if (offset < ctx->code_size) {
+            unsigned char x = (unsigned char)code_start[offset];
+            int size = get_instruction_size((x & 0xF0) >> 4, x & 0x0F, code_start + offset);
+            if (size <= 0) break;
+            offset += size;
+        }
+    }
+    
+    /* Second pass: verify calls */
+    offset = 0;
+    while (offset < ctx->code_size) {
+        const char *ip = code_start + offset;
+        unsigned char x = (unsigned char)*ip;
+        unsigned char h = (x & 0xF0) >> 4;
+        unsigned char l = x & 0x0F;
+        
+        if (h == OP_CTRL) {
+            if (l == CTRL_CALL) {
+                int target = read_int_at(ip, 1);
+                int n_args = read_int_at(ip, 1 + sizeof(int));
+                if (n_args > MAX_PARAMS) {
+                    report_error(ctx, offset, "Too many arguments: %d", n_args);
+                }
+                
+                /* Find function */
+                FunctionInfo *target_func = NULL;
+                for (int i = 0; i < ctx->function_count; i++) {
+                    if (ctx->functions[i].address == target) {
+                        target_func = &ctx->functions[i];
+                        break;
+                    }
+                }
+                
+                if (!target_func) {
+                    report_error(ctx, offset, "CALL to non-function address %d", target);
+                    errors++;
+                } else if (target_func->is_closure) {
+                    report_error(ctx, offset, 
+                                "CALL to closure (use CALLC instead)");
+                    errors++;
+                } else if (n_args != target_func->params) {
+                    report_error(ctx, offset,
+                                "Wrong number of arguments: expected %d, got %d",
+                                target_func->params, n_args);
+                    errors++;
+                }
+            }
+            else if (l == CTRL_CALLC) {
+                int n_args = read_int_at(ip, 1);
+                /* CALLC pops function from stack, so target is dynamic */
+                /* Can't fully verify statically */
+            }
+            else if (l == CTRL_CLOSURE) {
+                int target = read_int_at(ip, 1);
+                int n_caps = read_int_at(ip, 1 + sizeof(int));
+                
+                FunctionInfo *target_func = NULL;
+                for (int i = 0; i < ctx->function_count; i++) {
+                    if (ctx->functions[i].address == target) {
+                        target_func = &ctx->functions[i];
+                        break;
+                    }
+                }
+                
+                if (!target_func) {
+                    report_error(ctx, offset, "CLOSURE of non-function address %d", target);
+                    errors++;
+                } else if (!target_func->is_closure) {
+                    report_error(ctx, offset, 
+                                "CLOSURE of non-closure function");
+                    errors++;
+                } else if (n_caps < target_func->captures) {
+                    report_error(ctx, offset,
+                                "Insufficient captures: need %d, got %d",
+                                target_func->captures, n_caps);
+                    errors++;
+                }
+            }
+        }
+        
+        offset += get_instruction_size(h, l, ip);
+    }
+    
+    if (ctx->verbose) {
+        printf("Found %d functions\n", ctx->function_count);
+        printf("Function call errors: %d\n", errors);
+    }
+    
+    return errors == 0;
+}
+
+/* Phase 5: Verify stack usage in function blocks */
+bool verify_stack_usage(VerifierContext *ctx) {
+    int errors = 0;
+    
+    if (ctx->verbose) {
+        printf("\n=== Phase 5: Stack Usage Verification ===\n");
+    }
+    
+    for (int i = 0; i < ctx->function_count; i++) {
+        FunctionInfo *func = &ctx->functions[i];
+        
+        /* Analyze stack usage in this function */
+        int stack_at_entry = func->locals + func->captures;
+        
+        if (ctx->verbose) {
+            printf("Function at 0x%04x: params=%d, locals=%d, captures=%d, entry_stack=%d\n",
+                   func->address, func->params, func->locals, 
+                   func->captures, stack_at_entry);
+        }
+        
+        /* Check that BEGIN/CBEGIN have correct stack */
+        if (func->address < ctx->code_size) {
+            const char *ip = ctx->bf->code_ptr + func->address;
+            unsigned char x = (unsigned char)*ip;
+            unsigned char h = (x & 0xF0) >> 4;
+            unsigned char l = x & 0x0F;
+            
+            if (h == OP_CTRL && (l == CTRL_BEGIN || l == CTRL_CBEGIN)) {
+                /* BEGIN/CBEGIN expect n_caps and function on stack */
+                int expected_stack_before = 2;  /* n_caps + function */
+                
+                if (ctx->stack_heights[func->address] != expected_stack_before) {
+                    report_error(ctx, func->address,
+                                "Wrong stack height at function entry: expected %d, got %d",
+                                expected_stack_before, ctx->stack_heights[func->address]);
+                    errors++;
+                }
+                
+                /* Check stack after function prologue */
+                int after_prologue = func->address + get_instruction_size(h, l, ip);
+                if (after_prologue < ctx->code_size) {
+                    if (ctx->stack_heights[after_prologue] != stack_at_entry) {
+                        report_error(ctx, after_prologue,
+                                    "Wrong stack after function prologue: expected %d, got %d",
+                                    stack_at_entry, ctx->stack_heights[after_prologue]);
+                        errors++;
+                    }
+                }
+            }
+        }
+    }
+    
+    if (ctx->verbose) {
+        printf("Stack usage errors: %d\n", errors);
+    }
+    
+    return errors == 0;
 }
 
 /* Main verification function */
 bool verify_bytecode(bytefile *bf, const char *fname) {
+    return verify_bytecode_internal(bf, fname, false);
+}
 
-    signal(SIGSEGV, sigsegv_handler);
+bool verify_bytecode_verbose(bytefile *bf, const char *fname) {
+    return verify_bytecode_internal(bf, fname, true);
+}
 
-    /* Временное решение: вычисляем размер кода грубо */
-    const char *code_start = get_bf_code_ptr(bf);
+static bool verify_bytecode_internal(bytefile *bf, const char *fname, bool verbose) {
+    printf("\n=== Lama Bytecode Verifier ===\n");
+    printf("File: %s\n", fname);
+    //printf("Code size: %ld bytes\n", (long)(code_stop_ptr - bf->code_ptr + 1));
+    printf("Global variables: %d\n", bf->global_area_size);
+    printf("String table: %d bytes\n", bf->stringtab_size);
+    printf("Public symbols: %d\n\n", bf->public_symbols_number);
     
-    /* Ищем конец кода по инструкции HALT */
+    /* Estimate code size */
     int code_size = 0;
-    for (int i = 0; i < 100000; i++) {  /* Ограничиваем поиск */
-        if (i >= 100000 - 1) {
-            /* Не нашли HALT в пределах лимита */
-            code_size = 10000; /* Консервативная оценка */
+    const char *code_start = bf->code_ptr;
+    for (int i = 0; i < 1000000; i++) {
+        if (i >= 1000000 - 1) {
+            code_size = 10000;
             break;
         }
-        
         unsigned char x = (unsigned char)code_start[i];
-        unsigned char h = (x & 0xF0) >> 4;
-        
-        if (h == OP_HALT) {
+        if ((x & 0xF0) >> 4 == OP_HALT) {
             code_size = i + 1;
             break;
         }
     }
     
-    if (code_size == 0) {
-        code_size = 1000; /* Минимальная оценка */
-    }
-    
-    VerifierContext *ctx = create_verifier_context(bf, fname, code_size);
-    if (!ctx) {
-        fprintf(stderr, "Failed to create verifier context\n");
+    if (code_size <= 0) {
+        printf("❌ ERROR: Cannot determine code size\n");
         return false;
     }
     
-    printf("Verifying bytecode file: %s\n", fname);
-    printf("Code size: %d bytes\n", ctx->code_size);
-    printf("String table: %d bytes\n", get_bf_stringtab_size(bf));
-    printf("Global area: %d words\n", get_bf_global_area_size(bf));
-    printf("Public symbols: %d\n", get_bf_public_symbols_number(bf));
-    
-    bool ok = true;
-    
-    /* Step 1: Verify instruction encoding */
-    printf("\n[1/5] Verifying instruction encoding...\n");
-    const char *ip = code_start;
-    int offset = 0;
-    
-    while (offset < ctx->code_size) {
-        if (!verify_instruction_at(ctx, ip, offset)) {
-            ok = false;
-        }
-        
-        unsigned char x = (unsigned char)*ip;
-        unsigned char h = (x & 0xF0) >> 4;
-        unsigned char l = x & 0x0F;
-        
-        int size = get_instruction_size(h, l, ip);
-        if (size <= 0) {
-            report_error(ctx, offset, "Invalid instruction size");
-            ok = false;
-            break;
-        }
-        
-        offset += size;
-        ip += size;
-        ctx->total_instructions++;
+    VerifierContext *ctx = create_verifier_context(bf, fname, code_size, verbose);
+    if (!ctx) {
+        printf("❌ ERROR: Failed to create verifier context\n");
+        return false;
     }
     
-    /* Step 2: Control flow analysis */
-    printf("[2/5] Analyzing control flow...\n");
-    if (!analyze_control_flow(ctx)) {
-        ok = false;
-    }
+    /* Run verification phases */
+    bool phase1 = verify_instruction_encoding(ctx);
+    bool phase2 = verify_control_flow(ctx);
+    bool phase3 = verify_variable_references(ctx);
+    bool phase4 = verify_function_calls(ctx);
+    bool phase5 = verify_stack_usage(ctx);
     
-    /* Step 3: Verify variable references */
-    printf("[3/5] Verifying variable references...\n");
-    if (!verify_variable_references(ctx)) {
-        ok = false;
-    }
-    
-    /* Step 4: Report results */
-    printf("[4/5] Generating report...\n");
+    /* Summary */
+    printf("\n=== Verification Summary ===\n");
+    printf("1. Instruction encoding: %s\n", phase1 ? "✅ PASS" : "❌ FAIL");
+    printf("2. Control flow: %s\n", phase2 ? "✅ PASS" : "❌ FAIL");
+    printf("3. Variable references: %s\n", phase3 ? "✅ PASS" : "❌ FAIL");
+    printf("4. Function calls: %s\n", phase4 ? "✅ PASS" : "❌ FAIL");
+    printf("5. Stack usage: %s\n", phase5 ? "✅ PASS" : "❌ FAIL");
+    printf("Maximum stack depth: %d\n", ctx->max_stack_height);
+    printf("Total instructions: %d\n", ctx->total_instructions);
     
     if (ctx->error_count > 0) {
-        printf("\n❌ Verification failed with %d error(s):\n", ctx->error_count);
-        for (int i = 0; i < ctx->error_count; i++) {
-            printf("  Error at offset 0x%04x: %s\n", 
-                   ctx->errors[i].offset, ctx->errors[i].message);
+        printf("\n❌ VERIFICATION FAILED with %d error(s):\n", ctx->error_count);
+        for (int i = 0; i < ctx->error_count && i < 20; i++) {
+            printf("  [0x%04x] %s\n", ctx->errors[i].offset, 
+                   ctx->errors[i].message ? ctx->errors[i].message : "(no message)");
         }
-        ok = false;
+        if (ctx->error_count > 20) {
+            printf("  ... and %d more errors\n", ctx->error_count - 20);
+        }
     } else {
-        printf("\n✅ Bytecode verification passed!\n");
-        printf("   Total instructions: %d\n", ctx->total_instructions);
-        printf("   Maximum stack height: %d\n", ctx->max_stack_height);
-        if (ctx->code_size > 0) {
-            printf("   Reachable code: %d%%\n", 
-                   (int)(100.0 * ctx->total_instructions / ctx->code_size));
-        }
+        printf("\n✅ VERIFICATION SUCCESSFUL\n");
     }
     
     print_verification_errors(ctx);
     free_verifier_context(ctx);
-    return ok;
-}
-
-/* Print verification errors */
-void print_verification_errors(VerifierContext *ctx) {
-    if (ctx->error_count == 0) {
-        printf("No verification errors found.\n");
-        return;
-    }
     
-    printf("Verification errors (%d):\n", ctx->error_count);
+    return ctx->error_count == 0;
+}
+
+/* Print all errors */
+void print_verification_errors(VerifierContext *ctx) {
+    if (!ctx || ctx->error_count == 0) return;
+    
+    printf("\nDetailed errors:\n");
     for (int i = 0; i < ctx->error_count; i++) {
-        printf("  [%04x] %s\n", ctx->errors[i].offset, ctx->errors[i].message);
+        printf("%4d. [0x%04x] %s\n", i+1, ctx->errors[i].offset, ctx->errors[i].message);
     }
 }
 
-/* Free verifier context */
+/* Free resources */
 void free_verifier_context(VerifierContext *ctx) {
     if (!ctx) return;
     
-    free(ctx->stack_heights);
-    free(ctx->visited);
-    free(ctx->is_jump_target);
+    if (ctx->fname) free(ctx->fname);
+    if (ctx->stack_heights) free(ctx->stack_heights);
+    if (ctx->visited) free(ctx->visited);
+    if (ctx->is_jump_target) free(ctx->is_jump_target);
+    if (ctx->is_function_start) free(ctx->is_function_start);
+    if (ctx->functions) free(ctx->functions);
     
-    for (int i = 0; i < ctx->error_count; i++) {
-        free(ctx->errors[i].message);
+    if (ctx->errors) {
+        for (int i = 0; i < ctx->error_count; i++) {
+            if (ctx->errors[i].message) {
+                free(ctx->errors[i].message);
+            }
+        }
+        free(ctx->errors);
     }
-    free(ctx->errors);
     
     free(ctx);
 }

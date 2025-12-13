@@ -319,23 +319,6 @@ static int safe_mod(lama_State *L, bytefile *bf, int a, int b) {
 
 #define FAIL check(false)
 
-typedef enum{
-    OP_ADD = 1,
-    OP_SUB,
-    OP_MUL,
-    OP_DIV,
-    OP_MOD,
-    OP_LT,
-    OP_LE,
-    OP_GT,
-    OP_GE,
-    OP_EQ,
-    OP_NEQ,
-    OP_AND,
-    OP_OR,
-    OP_N
-} OPS;
-
 static void lama_settop(lama_State *L, int idx) {
     if(idx < 0) {
         if (-idx > (L->base - stack_top)) {
@@ -1191,27 +1174,31 @@ int main (int argc, char* argv[]) {
         failure("Usage:\n"
                 "  %s program.bc        – execute Lama bytecode\n"
                 "  %s --idioms program.bc – analyze idioms\n",
-		" %s --verify program.bc - verify bytecode\n",
+		        " %s --verify program.bc - verify bytecode\n",
                 argv[0], argv[0], argv[0]);
     }
 
-    if (strcmp(argv[1], "--verify") == 0) {
-        if (argc < 3) {
-            failure("Usage: %s --verify <bytecode-file>\n", argv[0]);
-        }
-        
-        bytefile* bf = read_file(argv[2]);
-        if (!bf) {
-            failure("Failed to read bytecode file\n");
-        }
-        
-        bool ok = verify_bytecode(bf, argv[2]);
-        
-        free(bf->global_ptr);
-        free(bf);
-        
-        return ok ? 0 : 1;
+    if (strcmp(argv[1], "--verify") == 0 || strcmp(argv[1], "--verify-verbose") == 0) {
+    if (argc < 3) {
+        failure("Usage: %s --verify <bytecode-file>\n"
+                "       %s --verify-verbose <bytecode-file>\n", 
+                argv[0], argv[0]);
     }
+    
+    bytefile* bf = read_file(argv[2]);
+    if (!bf) {
+        failure("Failed to read bytecode file\n");
+    }
+    
+    bool verbose = (strcmp(argv[1], "--verify-verbose") == 0);
+    bool ok = verbose ? verify_bytecode_verbose(bf, argv[2]) : 
+                       verify_bytecode(bf, argv[2]);
+    
+    free(bf->global_ptr);
+    free(bf);
+    
+    return ok ? 0 : 1;
+}
 
     if (strcmp(argv[1], "--idioms") == 0) {
         if (argc < 3) failure("Usage: %s --idioms <bytecode-file>\n", argv[0]);

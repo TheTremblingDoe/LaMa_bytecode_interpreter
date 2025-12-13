@@ -86,4 +86,29 @@ typedef enum {
     LOC_N = 4
 } LocationType;
 
+/* bytecode_common.h - дополнение */
+
+/* Binary operations */
+typedef enum {
+    OP_ADD = 1,
+    OP_SUB,
+    OP_MUL,
+    OP_DIV,
+    OP_MOD,
+    OP_LT,
+    OP_LE,
+    OP_GT,
+    OP_GE,
+    OP_EQ,
+    OP_NEQ,
+    OP_AND,
+    OP_OR,
+    OP_N
+} BinOp;
+
+/* Other useful constants */
+#define MAX_STACK_DEPTH 10000
+#define MAX_GLOBALS 10000
+#define MAX_STRINGS 100000
+
 #endif /* BYTECODE_DEFS_H */
