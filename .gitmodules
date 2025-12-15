@@ -1,0 +1,3 @@
+[submodule "Lama"]
+	path = Lama
+	url = https://github.com/PLTools/Lama.git
