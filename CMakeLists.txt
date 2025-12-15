@@ -18,12 +18,14 @@ set(HEADER_FILES
 	runtime/runtime.h
 	tools/decode.h
 	tools/idiom.h
+    tools/opcode_names.h
 )
 
 add_library(Tools STATIC
     tools/decode.c
     tools/idiom.c
     tools/verifier.c
+    tools/opcode_names.c
 )
 
 add_library(Runtime STATIC

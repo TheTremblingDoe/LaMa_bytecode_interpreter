@@ -1,5 +1,6 @@
 #include "idiom.h"
 #include "decode.h"
+#include "opcode_names.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -105,11 +106,11 @@ void idiom_list_init(IdiomList* list) {
 
 void idiom_list_free(IdiomList* list) {
     if (!list) return;
-    
+
     for (uint32_t i = 0; i < list->count; i++) {
         free((void*)list->idioms[i].bytes);  // Освобождаем выделенную память
     }
-    
+
     free(list->idioms);
     list->idioms = NULL;
     list->count = 0;
@@ -164,15 +165,8 @@ Reachability find_reachable_instrs(const uint8_t* bytecode, uint32_t size,
                                   const uint32_t* proc_starts, uint32_t proc_count) {
     Reachability result = {0};
 
-    if (!bytecode || size == 0 || !proc_starts || proc_count == 0) {
-        printf("Debug: Invalid parameters to find_reachable_instrs\n");
+    if (!bytecode || size == 0) {
         return result;
-    }
-
-    printf("Debug: find_reachable_instrs called with size=%u, proc_count=%u\n", size, proc_count);
-    
-    for (uint32_t i = 0; i < proc_count; i++) {
-        printf("Debug: proc_starts[%u] = 0x%x (%u)\n", i, proc_starts[i], proc_starts[i]);
     }
 
     result.reachable = calloc(size, sizeof(bool));
@@ -180,7 +174,6 @@ Reachability find_reachable_instrs(const uint8_t* bytecode, uint32_t size,
     result.size = size;
 
     if (!result.reachable || !result.jump_targets) {
-        printf("Debug: Failed to allocate memory for reachability\n");
         free(result.reachable);
         free(result.jump_targets);
         return (Reachability){0};
@@ -189,7 +182,6 @@ Reachability find_reachable_instrs(const uint8_t* bytecode, uint32_t size,
     // Используем кольцевой буфер для BFS
     uint32_t* queue = malloc(size * sizeof(uint32_t));
     if (!queue) {
-        printf("Debug: Failed to allocate queue\n");
         free(result.reachable);
         free(result.jump_targets);
         return (Reachability){0};
@@ -204,26 +196,17 @@ Reachability find_reachable_instrs(const uint8_t* bytecode, uint32_t size,
             result.reachable[addr] = true;
             queue[queue_back] = addr;
             queue_back = (queue_back + 1) % size;
-            printf("Debug: Added entry point 0x%x (%u) to queue\n", addr, addr);
         }
     }
 
     Decoder decoder;
     decoder_init(&decoder, bytecode, size);
 
-    uint32_t processed_count = 0;
-    
     while (queue_front != queue_back) {
         uint32_t addr = queue[queue_front];
         queue_front = (queue_front + 1) % size;
-        
-        printf("Debug: Processing address 0x%x (%u), queue_front=%u, queue_back=%u\n", 
-               addr, addr, queue_front, queue_back);
 
-        if (addr >= size) {
-            printf("Debug: Address 0x%x out of bounds (size=%u)\n", addr, size);
-            continue;
-        }
+        if (addr >= size) continue;
 
         decoder_move_to(&decoder, addr);
 
@@ -233,25 +216,41 @@ Reachability find_reachable_instrs(const uint8_t* bytecode, uint32_t size,
             uint32_t end_addr;
             uint32_t jump_target;
             bool has_jump_target;
+            uint32_t call_target;
+            bool has_call_target;
         } InstrInfo;
 
         InstrInfo instr = {0};
 
         void decode_callback(const DecodeResult* result, void* userdata) {
             InstrInfo* info = (InstrInfo*)userdata;
+            static uint32_t imm_count = 0;  // Счетчик immediate значений
 
             switch (result->type) {
                 case RESULT_START:
                     info->start_addr = result->start.addr;
                     info->opcode = result->start.opcode;
+                    imm_count = 0;
                     break;
                 case RESULT_END:
                     info->end_addr = result->end.addr;
                     break;
                 case RESULT_IMM32:
+                    imm_count++;
+                    // Для инструкций перехода (JMP, CJMPz, CJMPnz)
                     if (is_jump_opcode(info->opcode)) {
                         info->jump_target = result->imm32.imm;
                         info->has_jump_target = true;
+                    }
+                    // Для инструкции CALL (0x56) первое immediate - адрес функции
+                    else if (info->opcode == 0x56 && imm_count == 1) {
+                        info->call_target = result->imm32.imm;
+                        info->has_call_target = true;
+                    }
+                    // Для инструкции CLOSURE (0x54) первое immediate - адрес функции
+                    else if (info->opcode == 0x54 && imm_count == 1) {
+                        info->call_target = result->imm32.imm;
+                        info->has_call_target = true;
                     }
                     break;
                 default:
@@ -260,64 +259,41 @@ Reachability find_reachable_instrs(const uint8_t* bytecode, uint32_t size,
         }
 
         if (!decoder_next(&decoder, decode_callback, &instr)) {
-            printf("Debug: Failed to decode instruction at 0x%x\n", addr);
             continue; // Пропускаем невалидные инструкции
         }
 
         // Проверяем границы
         if (instr.end_addr > size) {
-            printf("Debug: Instruction end 0x%x exceeds code size %u, clamping\n", 
-                   instr.end_addr, size);
             instr.end_addr = size;
         }
 
-        printf("Debug: Instruction at 0x%x: opcode=0x%02x, end=0x%x, length=%u\n", 
-               instr.start_addr, instr.opcode, instr.end_addr, 
-               instr.end_addr - instr.start_addr);
-
         // Если это прыжок, добавляем цель в очередь
         if (instr.has_jump_target && instr.jump_target < size) {
-            printf("Debug: Jump to target 0x%x\n", instr.jump_target);
             result.jump_targets[instr.jump_target] = true;
             if (!result.reachable[instr.jump_target]) {
                 result.reachable[instr.jump_target] = true;
                 queue[queue_back] = instr.jump_target;
                 queue_back = (queue_back + 1) % size;
-                printf("Debug: Added jump target 0x%x to queue\n", instr.jump_target);
             }
         }
 
-        // Если не терминальная инструкция, добавляем следующую
-        if (!is_terminal_opcode(instr.opcode) && instr.end_addr < size) {
+        // Если это вызов функции, добавляем адрес функции в очередь
+        if (instr.has_call_target && instr.call_target < size) {
+            if (!result.reachable[instr.call_target]) {
+                result.reachable[instr.call_target] = true;
+                queue[queue_back] = instr.call_target;
+                queue_back = (queue_back + 1) % size;
+            }
+        }
+
+        // Добавляем следующую инструкцию, даже если текущая терминальная
+        // Это нужно для обработки последовательных функций
+        if (instr.end_addr < size) {
             if (!result.reachable[instr.end_addr]) {
                 result.reachable[instr.end_addr] = true;
                 queue[queue_back] = instr.end_addr;
                 queue_back = (queue_back + 1) % size;
-                printf("Debug: Added next instruction at 0x%x to queue\n", instr.end_addr);
             }
-        }
-        
-        processed_count++;
-        if (processed_count > 100) { // Защита от бесконечного цикла
-            printf("Debug: Processed too many instructions, breaking\n");
-            break;
-        }
-    }
-
-    // Подсчитаем достижимые инструкции
-    uint32_t reachable_count = 0;
-    for (uint32_t i = 0; i < size; i++) {
-        if (result.reachable[i]) reachable_count++;
-    }
-    printf("Debug: Total reachable bytes: %u out of %u\n", reachable_count, size);
-    
-    // Выведем первые достижимые инструкции
-    printf("Debug: First 20 reachable bytes:\n");
-    for (uint32_t i = 0; i < 20 && i < size; i++) {
-        if (result.reachable[i]) {
-            printf("  [0x%x]: 0x%02x (reachable)\n", i, bytecode[i]);
-        } else {
-            printf("  [0x%x]: 0x%02x\n", i, bytecode[i]);
         }
     }
 
@@ -334,8 +310,8 @@ void reachability_free(Reachability* r) {
     r->size = 0;
 }
 
-static void parametrize_instruction(const uint8_t* bytecode, uint32_t start, 
-                                   uint32_t end, uint8_t* param_buffer, 
+static void parametrize_instruction(const uint8_t* bytecode, uint32_t start,
+                                   uint32_t end, uint8_t* param_buffer,
                                    uint32_t* param_len);
 
 typedef struct {
@@ -353,23 +329,23 @@ typedef struct {
 
 static void walk_callback(uint32_t start_addr, uint8_t opcode, uint32_t end_addr, void* userdata);
 
-static void parametrize_instruction(const uint8_t* bytecode, uint32_t start, 
-                                   uint32_t end, uint8_t* param_buffer, 
+static void parametrize_instruction(const uint8_t* bytecode, uint32_t start,
+                                   uint32_t end, uint8_t* param_buffer,
                                    uint32_t* param_len) {
     if (start >= end) {
         *param_len = 0;
         return;
     }
-    
+
     uint8_t opcode = bytecode[start];
     uint32_t pos = 0;
-    
+
     // Копируем опкод
     param_buffer[pos++] = opcode;
-    
+
     // В зависимости от опкода определяем длину immediate
     uint32_t imm_len = 0;
-    
+
     switch (opcode) {
         // Инструкции без immediate (1 байт)
         case 0x01: case 0x02: case 0x03: case 0x04: case 0x05:
@@ -382,7 +358,7 @@ static void parametrize_instruction(const uint8_t* bytecode, uint32_t start,
         case 0x70: case 0x71: case 0x72: case 0x73:
             imm_len = 0;
             break;
-            
+
         // Инструкции с 4-байтным immediate
         case 0x10: case 0x11: case 0x15:
         case 0x20: case 0x21: case 0x22: case 0x23:
@@ -392,13 +368,13 @@ static void parametrize_instruction(const uint8_t* bytecode, uint32_t start,
         case 0x74:
             imm_len = 4;
             break;
-            
+
         // Инструкции с 8-байтным immediate (два 4-байтных)
         case 0x12: case 0x52: case 0x53: case 0x56: case 0x57:
         case 0x59:
             imm_len = 8;
             break;
-            
+
         // CLOSURE - переменная длина, обрабатываем как есть
         case 0x54:
             // Для CLOSURE сохраняем структуру, но обнуляем captured variables
@@ -406,22 +382,22 @@ static void parametrize_instruction(const uint8_t* bytecode, uint32_t start,
             // Пока упростим: обнуляем все после опкода
             imm_len = end - start - 1;
             break;
-            
+
         case 0x55: // CALLC
             imm_len = 0;
             break;
-            
+
         default:
             // Для неизвестных опкодов считаем, что нет immediate
             imm_len = 0;
             break;
     }
-    
+
     // Заполняем immediate нулями
     for (uint32_t i = 0; i < imm_len; i++) {
         param_buffer[pos++] = 0;
     }
-    
+
     *param_len = pos;
 }
 
@@ -468,7 +444,7 @@ static void walk_callback(uint32_t start_addr, uint8_t opcode, uint32_t end_addr
         decoder_move_to(&decoder, end_addr);
 
         WalkInstr next_instr = {0};
-        
+
         void next_callback(const DecodeResult* result, void* userdata) {
             WalkInstr* info = (WalkInstr*)userdata;
             switch (result->type) {
@@ -485,16 +461,16 @@ static void walk_callback(uint32_t start_addr, uint8_t opcode, uint32_t end_addr
         }
 
         if (decoder_next(&decoder, next_callback, &next_instr)) {
-            if (next_instr.start_addr < data->size && 
+            if (next_instr.start_addr < data->size &&
                 next_instr.end_addr <= data->size &&
                 next_instr.start_addr == end_addr) {
-                
+
                 // Параметризуем следующую инструкцию
                 uint8_t next_param[32];
                 uint32_t next_len = 0;
-                parametrize_instruction(data->bytecode, next_instr.start_addr, 
+                parametrize_instruction(data->bytecode, next_instr.start_addr,
                                        next_instr.end_addr, next_param, &next_len);
-                
+
                 if (curr_len > 0 && next_len > 0) {
                     // Создаем пару инструкций
                     uint32_t total_len = curr_len + next_len;
@@ -502,13 +478,67 @@ static void walk_callback(uint32_t start_addr, uint8_t opcode, uint32_t end_addr
                     if (pair_bytes) {
                         memcpy(pair_bytes, curr_param, curr_len);
                         memcpy(pair_bytes + curr_len, next_param, next_len);
-                        
+
                         uint32_t hash2 = fnv1a_hash(pair_bytes, total_len);
                         hash_table_insert(data->table, pair_bytes, total_len, hash2);
                     }
                 }
             }
         }
+    }
+}
+
+// Функция для преобразования параметризованной последовательности в читаемый вид
+void decode_parametrized_sequence(const uint8_t* bytes, uint32_t len, char* buffer, size_t buffer_size) {
+    if (!bytes || len == 0 || !buffer || buffer_size == 0) {
+        buffer[0] = '\0';
+        return;
+    }
+
+    buffer[0] = '\0';
+
+    Decoder decoder;
+    decoder_init(&decoder, bytes, len);
+    uint32_t pos = 0;
+
+    while (pos < len) {
+        decoder_move_to(&decoder, pos);
+
+        typedef struct {
+            uint32_t start_addr;
+            uint8_t opcode;
+            uint32_t end_addr;
+        } InstrInfo;
+
+        InstrInfo instr = {0};
+
+        void decode_callback(const DecodeResult* result, void* userdata) {
+            InstrInfo* info = (InstrInfo*)userdata;
+            switch (result->type) {
+                case RESULT_START:
+                    info->start_addr = result->start.addr;
+                    info->opcode = result->start.opcode;
+                    break;
+                case RESULT_END:
+                    info->end_addr = result->end.addr;
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        if (!decoder_next(&decoder, decode_callback, &instr)) {
+            break;
+        }
+
+        // Добавляем мнемонику в буфер
+        const char* opname = get_opcode_human_name(instr.opcode);
+        if (buffer[0] != '\0') {
+            strncat(buffer, " ", buffer_size - strlen(buffer) - 1);
+        }
+        strncat(buffer, opname, buffer_size - strlen(buffer) - 1);
+
+        pos = instr.end_addr;
     }
 }
 

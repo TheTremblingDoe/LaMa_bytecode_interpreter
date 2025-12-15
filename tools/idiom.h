@@ -39,6 +39,8 @@ Reachability find_reachable_instrs(const uint8_t* bytecode, uint32_t size,
                                   const uint32_t* proc_starts, uint32_t proc_count);
 void reachability_free(Reachability* r);
 
+void decode_parametrized_sequence(const uint8_t* bytes, uint32_t len, char* buffer, size_t buffer_size);
+
 // Основная функция анализа идиом
 IdiomList analyze_idioms(const uint8_t* bytecode, uint32_t size,
                         const uint32_t* proc_starts, uint32_t proc_count);

@@ -25,7 +25,7 @@ uint32_t decoder_pos(const Decoder* d) {
     return d->pos;
 }
 
-static void emit_result(Decoder* d, void (*listener)(const DecodeResult*, void*), 
+static void emit_result(Decoder* d, void (*listener)(const DecodeResult*, void*),
                        void* userdata, DecodeResult* result) {
     if (listener) {
         listener(result, userdata);
@@ -44,15 +44,15 @@ bool decoder_next(Decoder* d, void (*listener)(const DecodeResult*, void*), void
 
     uint32_t op_start = d->pos;
     uint8_t opcode = d->bc[d->pos++];
-    
+
     // Emit start
     DecodeResult start_result = {.type = RESULT_START};
     start_result.start.addr = op_start;
     start_result.start.opcode = opcode;
     emit_result(d, listener, userdata, &start_result);
-    
+
     bool success = true;
-    
+
     // Определяем тип и количество immediate
     switch (opcode) {
         // 0 байт immediate
@@ -66,7 +66,7 @@ bool decoder_next(Decoder* d, void (*listener)(const DecodeResult*, void*), void
         case 0x55: // CALLC
             // Нет immediate
             break;
-            
+
         // 1 immediate (4 байта)
         case 0x10: case 0x11: // CONST, STRING
         case 0x15: // JMP
@@ -88,7 +88,7 @@ bool decoder_next(Decoder* d, void (*listener)(const DecodeResult*, void*), void
                 success = false;
             }
             break;
-            
+
         // 2 immediate (8 байт)
         case 0x12: // SEXP
         case 0x52: case 0x53: // BEGIN, CBEGIN
@@ -106,7 +106,7 @@ bool decoder_next(Decoder* d, void (*listener)(const DecodeResult*, void*), void
                 success = false;
             }
             break;
-            
+
         // CLOSURE - переменная длина
         case 0x54:
             if (d->pos + 8 <= d->size) {
@@ -116,14 +116,14 @@ bool decoder_next(Decoder* d, void (*listener)(const DecodeResult*, void*), void
                 target_result.imm32.imm = read_u32_le(d->bc + d->pos);
                 d->pos += 4;
                 emit_result(d, listener, userdata, &target_result);
-                
+
                 // Количество захватов (4 байта)
                 DecodeResult count_result = {.type = RESULT_IMM32};
                 count_result.imm32.addr = d->pos;
                 count_result.imm32.imm = read_u32_le(d->bc + d->pos);
                 d->pos += 4;
                 emit_result(d, listener, userdata, &count_result);
-                
+
                 // Читаем захваты (varspec: 1 байт kind + 4 байта index)
                 uint32_t capture_count = count_result.imm32.imm;
                 for (uint32_t i = 0; i < capture_count && success; i++) {
@@ -143,7 +143,7 @@ bool decoder_next(Decoder* d, void (*listener)(const DecodeResult*, void*), void
                 success = false;
             }
             break;
-            
+
         default:
             DecodeResult error_result = {.type = RESULT_ERROR};
             error_result.error.addr = op_start;
@@ -153,17 +153,17 @@ bool decoder_next(Decoder* d, void (*listener)(const DecodeResult*, void*), void
             success = false;
             break;
     }
-    
+
     if (!success) {
         d->pos = d->size; // При ошибке перемещаемся в конец
     }
-    
+
     // Всегда эмитим конец инструкции
     DecodeResult end_result = {.type = RESULT_END};
     end_result.end.addr = d->pos;
     end_result.end.start = op_start;
     emit_result(d, listener, userdata, &end_result);
-    
+
     return success;
 }
 
@@ -175,7 +175,7 @@ bool is_jump_opcode(uint8_t opcode) {
 
 bool should_split_after_opcode(uint8_t opcode) {
     return opcode == 0x15 ||    // JMP
-           opcode == 0x50 ||    // CJMPz  
+           opcode == 0x50 ||    // CJMPz
            opcode == 0x51 ||    // CJMPnz
            opcode == 0x16 ||    // END
            opcode == 0x17 ||    // RET

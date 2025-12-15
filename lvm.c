@@ -12,6 +12,7 @@
 #include "tools/idiom.h"
 #include "tools/decode.h"
 #include "tools/verifier.h"
+#include "tools/opcode_names.h"
 #include "runtime/runtime.h"
 #include "tools/bytecode_defs.h"
 
@@ -1179,26 +1180,26 @@ int main (int argc, char* argv[]) {
     }
 
     if (strcmp(argv[1], "--verify") == 0 || strcmp(argv[1], "--verify-verbose") == 0) {
-    if (argc < 3) {
-        failure("Usage: %s --verify <bytecode-file>\n"
-                "       %s --verify-verbose <bytecode-file>\n", 
-                argv[0], argv[0]);
+        if (argc < 3) {
+            failure("Usage: %s --verify <bytecode-file>\n"
+                    "       %s --verify-verbose <bytecode-file>\n", 
+                    argv[0], argv[0]);
+        }
+        
+        bytefile* bf = read_file(argv[2]);
+        if (!bf) {
+            failure("Failed to read bytecode file\n");
+        }
+        
+        bool verbose = (strcmp(argv[1], "--verify-verbose") == 0);
+        bool ok = verbose ? verify_bytecode_verbose(bf, argv[2], code_stop_ptr) :
+                           verify_bytecode(bf, argv[2], code_stop_ptr);
+        
+        free(bf->global_ptr);
+        free(bf);
+        
+        return ok ? 0 : 1;
     }
-    
-    bytefile* bf = read_file(argv[2]);
-    if (!bf) {
-        failure("Failed to read bytecode file\n");
-    }
-    
-    bool verbose = (strcmp(argv[1], "--verify-verbose") == 0);
-    bool ok = verbose ? verify_bytecode_verbose(bf, argv[2], code_stop_ptr) :
-                       verify_bytecode(bf, argv[2], code_stop_ptr);
-    
-    free(bf->global_ptr);
-    free(bf);
-    
-    return ok ? 0 : 1;
-}
 
     if (strcmp(argv[1], "--idioms") == 0) {
         if (argc < 3) failure("Usage: %s --idioms <bytecode-file>\n", argv[0]);
@@ -1208,56 +1209,77 @@ int main (int argc, char* argv[]) {
             failure("Failed to read bytecode file\n");
         }
 
-        // Собираем точки входа (все публичные символы)
-        uint32_t* entrypoints = malloc((bf->public_symbols_number + 1) * sizeof(uint32_t));
-        if (!entrypoints) {
-            failure("Failed to allocate memory for entrypoints\n");
-        }
-
-        uint32_t entry_count = 0;
-
-        for (int i = 0; i < bf->public_symbols_number; i++) {
-            int offset = get_public_offset(bf, i);
-            if (offset >= 0 && offset < (code_stop_ptr - bf->code_ptr)) {
-                entrypoints[entry_count++] = (uint32_t)offset;
-            }
-        }
-
-        if (entry_count == 0) {
-            // Если нет публичных символов, используем 0 как точку входа
-            entrypoints[entry_count++] = 0;
-        }
-
         // DEBUG entry_points from public_symbols
-        printf("Debug: public_symbols_number = %d\n", bf->public_symbols_number);
-        for (int i = 0; i < bf->public_symbols_number; i++) {
-            int offset = get_public_offset(bf, i);
-            printf("Debug: public[%d] offset = %d (0x%x)\n", i, offset, offset);
-        }
+        //printf("Debug: public_symbols_number = %d\n", bf->public_symbols_number);
+        //for (int i = 0; i < bf->public_symbols_number; i++) {
+        //    int offset = get_public_offset(bf, i);
+        //    printf("Debug: public[%d] offset = %d (0x%x)\n", i, offset, offset);
+        //}
 
         uint32_t code_size = (uint32_t)(code_stop_ptr - bf->code_ptr + 1);
 
         const uint8_t* code = (const uint8_t*)bf->code_ptr;
 
         // DEBUG code_size and code
-        printf("Debug: code_size = %u bytes\n", code_size);
-        printf("Debug: code starts at offset %ld from file start\n", bf->code_ptr - bf->buffer);
-        printf("Debug: first 20 bytes of code:\n");
-        for (int i = 0; i < 20 && i < code_size; i++) {
-            printf("%02x ", code[i]);
-        }
-        printf("\n");
+        //printf("Debug: code_size = %u bytes\n", code_size);
+        //printf("Debug: code starts at offset %ld from file start\n", bf->code_ptr - bf->buffer);
+        //printf("Debug: first 20 bytes of code:\n");
+        //for (int i = 0; i < 20 && i < code_size; i++) {
+        //    printf("%02x ", code[i]);
+        //}
+        //printf("\n");
 
         // Проверяем, что размер корректен
         if (code_size == 0) {
             failure("Empty bytecode\n");
         }
 
-        IdiomList idioms = analyze_idioms(code, code_size, entrypoints, entry_count);
+        // Находим все точки входа (BEGIN и CBEGIN инструкции)
+        uint32_t max_entrypoints = 100; // Достаточно большое число
+        uint32_t* all_entrypoints = malloc(max_entrypoints * sizeof(uint32_t));
+        uint32_t all_entry_count = 0;
+        
+        // Добавляем публичные символы
+        for (int i = 0; i < bf->public_symbols_number; i++) {
+            int offset = get_public_offset(bf, i);
+            if (offset >= 0 && offset < code_size) {
+                all_entrypoints[all_entry_count++] = (uint32_t)offset;
+            }
+        }
+        
+        // Ищем все BEGIN (0x52) и CBEGIN (0x53) инструкции
+        for (uint32_t i = 0; i < code_size; i++) {
+            if (code[i] == 0x52 || code[i] == 0x53) { // BEGIN или CBEGIN
+                // Проверяем, что это действительно инструкция, а не байт данных
+                // Упрощенно: если следующий байт в пределах кода и инструкция имеет правильную длину
+                if (i + 8 < code_size) { // BEGIN/CBEGIN имеют длину 9 байт
+                    // Проверяем, что нет дубликатов
+                    bool exists = false;
+                    for (uint32_t j = 0; j < all_entry_count; j++) {
+                        if (all_entrypoints[j] == i) {
+                            exists = true;
+                            break;
+                        }
+                    }
+                    if (!exists) {
+                        all_entrypoints[all_entry_count++] = i;
+                        if (all_entry_count >= max_entrypoints) {
+                            max_entrypoints *= 2;
+                            all_entrypoints = realloc(all_entrypoints, max_entrypoints * sizeof(uint32_t));
+                        }
+                    }
+                }
+            }
+        }
+
+        if (all_entry_count == 0) {
+            all_entrypoints[all_entry_count++] = 0;
+        }
+
+        IdiomList idioms = analyze_idioms(code, code_size, all_entrypoints, all_entry_count);
 
         printf("=== Idiom frequency analysis ===\n");
-        printf("Total idioms found: %u\n", idioms.count);
-        printf("\n");
+        printf("Total idioms found: %u\n\n", idioms.count);
 
         // После получения code и code_size
         printf("Full code dump (%u bytes):\n", code_size);
@@ -1270,15 +1292,20 @@ int main (int argc, char* argv[]) {
         for (uint32_t i = 0; i < idioms.count; i++) {
             if (idioms.idioms[i].occurrences == 0) continue;
 
+            char readable[256] = {0};
+            decode_parametrized_sequence(idioms.idioms[i].bytes,
+                                        idioms.idioms[i].len,
+                                        readable, sizeof(readable));
+
             printf("%6u ×  ", idioms.idioms[i].occurrences);
             for (uint32_t j = 0; j < idioms.idioms[i].len; j++) {
-                printf("%02X ", idioms.idioms[i].bytes[j]);
+                printf("%02x ", idioms.idioms[i].bytes[j]);
             }
-            printf("\n");
+            printf("  # %s\n", readable);
         }
 
         free_idiom_list(&idioms);
-        free(entrypoints);
+        free(all_entrypoints);
         free(bf->global_ptr);
         free(bf);
         return 0;
