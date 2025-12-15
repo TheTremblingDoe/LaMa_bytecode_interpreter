@@ -1173,8 +1173,8 @@ void eval (bytefile *bf, char *fname) {
 int main (int argc, char* argv[]) {
     if (argc < 2) {
         failure("Usage:\n"
-                "  %s program.bc        – execute Lama bytecode\n"
-                "  %s --idioms program.bc – analyze idioms\n",
+                "  %s program.bc – execute Lama bytecode\n"
+                "  %s --idioms program.bc – analyze idioms\n"
 		        "  %s --verify program.bc - verify bytecode\n",
                 argv[0], argv[0], argv[0]);
     }
@@ -1209,33 +1209,17 @@ int main (int argc, char* argv[]) {
             failure("Failed to read bytecode file\n");
         }
 
-        // DEBUG entry_points from public_symbols
-        //printf("Debug: public_symbols_number = %d\n", bf->public_symbols_number);
-        //for (int i = 0; i < bf->public_symbols_number; i++) {
-        //    int offset = get_public_offset(bf, i);
-        //    printf("Debug: public[%d] offset = %d (0x%x)\n", i, offset, offset);
-        //}
-
         uint32_t code_size = (uint32_t)(code_stop_ptr - bf->code_ptr + 1);
 
         const uint8_t* code = (const uint8_t*)bf->code_ptr;
 
-        // DEBUG code_size and code
-        //printf("Debug: code_size = %u bytes\n", code_size);
-        //printf("Debug: code starts at offset %ld from file start\n", bf->code_ptr - bf->buffer);
-        //printf("Debug: first 20 bytes of code:\n");
-        //for (int i = 0; i < 20 && i < code_size; i++) {
-        //    printf("%02x ", code[i]);
-        //}
-        //printf("\n");
-
-        // Проверяем, что размер корректен
+        // Проверяем, что есть код
         if (code_size == 0) {
             failure("Empty bytecode\n");
         }
 
         // Находим все точки входа (BEGIN и CBEGIN инструкции)
-        uint32_t max_entrypoints = 100; // Достаточно большое число
+        uint32_t max_entrypoints = 100;
         uint32_t* all_entrypoints = malloc(max_entrypoints * sizeof(uint32_t));
         uint32_t all_entry_count = 0;
         
@@ -1311,10 +1295,6 @@ int main (int argc, char* argv[]) {
         return 0;
     }
 
-//    if (argc < 2) {
-//        failure("Usage: %s <bytecode-file>\n", argv[0]);
-//    }
-//
     bytefile *f = read_file (argv[1]);
     eval (f, argv[1]);
     free(f->global_ptr);
