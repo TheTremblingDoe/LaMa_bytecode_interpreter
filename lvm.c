@@ -180,6 +180,7 @@ bytefile* read_file (char *fname) {
 }
 
 #define INIT_STACK_SIZE 10000
+#define MAX_ENTRYPOINTS 100
 
 typedef struct Lama_Loc {
     int idx;
@@ -1209,35 +1210,22 @@ int main (int argc, char* argv[]) {
             failure("Failed to read bytecode file\n");
         }
 
-        uint32_t code_size = (uint32_t)(code_stop_ptr - bf->code_ptr + 1);
-
+        // После загрузки bytefile
         const uint8_t* code = (const uint8_t*)bf->code_ptr;
-
-        // Проверяем, что есть код
-        if (code_size == 0) {
-            failure("Empty bytecode\n");
-        }
-
-        // Находим все точки входа (BEGIN и CBEGIN инструкции)
-        uint32_t max_entrypoints = 100;
+        uint32_t code_size = (uint32_t)(code_stop_ptr - bf->code_ptr + 1);
+        
+        // Находим все BEGIN/CBEGIN инструкции
+        uint32_t max_entrypoints = MAX_ENTRYPOINTS;
         uint32_t* all_entrypoints = malloc(max_entrypoints * sizeof(uint32_t));
         uint32_t all_entry_count = 0;
         
-        // Добавляем публичные символы
-        for (int i = 0; i < bf->public_symbols_number; i++) {
-            int offset = get_public_offset(bf, i);
-            if (offset >= 0 && offset < code_size) {
-                all_entrypoints[all_entry_count++] = (uint32_t)offset;
-            }
-        }
-        
-        // Ищем все BEGIN (0x52) и CBEGIN (0x53) инструкции
+        // Ищем все 0x52 (BEGIN) и 0x53 (CBEGIN)
         for (uint32_t i = 0; i < code_size; i++) {
-            if (code[i] == 0x52 || code[i] == 0x53) { // BEGIN или CBEGIN
-                // Проверяем, что это действительно инструкция, а не байт данных
-                // Упрощенно: если следующий байт в пределах кода и инструкция имеет правильную длину
-                if (i + 8 < code_size) { // BEGIN/CBEGIN имеют длину 9 байт
-                    // Проверяем, что нет дубликатов
+            if (code[i] == 0x52 || code[i] == 0x53) {
+                // Проверяем, что это действительно начало инструкции
+                // Проверяем, что инструкция полностью в пределах кода
+                if (i + 8 < code_size) {
+                    // Проверяем на дубликаты
                     bool exists = false;
                     for (uint32_t j = 0; j < all_entry_count; j++) {
                         if (all_entrypoints[j] == i) {
@@ -1248,6 +1236,7 @@ int main (int argc, char* argv[]) {
                     if (!exists) {
                         all_entrypoints[all_entry_count++] = i;
                         if (all_entry_count >= max_entrypoints) {
+                            // Увеличиваем массив
                             max_entrypoints *= 2;
                             all_entrypoints = realloc(all_entrypoints, max_entrypoints * sizeof(uint32_t));
                         }
@@ -1255,32 +1244,36 @@ int main (int argc, char* argv[]) {
                 }
             }
         }
-
-        if (all_entry_count == 0) {
+        
+        // Также добавляем адрес 0 как точку входа
+        if (all_entry_count == 0 && code_size > 0) {
             all_entrypoints[all_entry_count++] = 0;
         }
-
-        IdiomList idioms = analyze_idioms(code, code_size, all_entrypoints, all_entry_count);
-
+        
+        IdiomList idioms = find_idioms(code, code_size, all_entrypoints, all_entry_count);
+        
+        // Выводим результаты
         printf("=== Idiom frequency analysis ===\n");
-        printf("Total idioms found: %u\n\n", idioms.count);
-
-        // После получения code и code_size
-        printf("Full code dump (%u bytes):\n", code_size);
-        for (uint32_t i = 0; i < code_size; i++) {
-            printf("%02x ", code[i]);
-            if ((i + 1) % 16 == 0) printf("\n");
+        printf("Total idioms found: %u\n", idioms.count);
+        printf("Entry points: %u\n\n", all_entry_count);
+        
+        // Выводим дамп только если код небольшой
+        if (code_size <= 256) {
+            printf("Code dump (%u bytes):\n", code_size);
+            for (uint32_t i = 0; i < code_size; i++) {
+                printf("%02x ", code[i]);
+                if ((i + 1) % 16 == 0) printf("\n");
+            }
+            printf("\n\n");
         }
-        printf("\n");
-
+        
+        // Выводим идиомы
+        char readable[256];
         for (uint32_t i = 0; i < idioms.count; i++) {
-            if (idioms.idioms[i].occurrences == 0) continue;
-
-            char readable[256] = {0};
             decode_parametrized_sequence(idioms.idioms[i].bytes,
                                         idioms.idioms[i].len,
                                         readable, sizeof(readable));
-
+            
             printf("%6u ×  ", idioms.idioms[i].occurrences);
             for (uint32_t j = 0; j < idioms.idioms[i].len; j++) {
                 printf("%02x ", idioms.idioms[i].bytes[j]);
