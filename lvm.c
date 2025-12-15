@@ -1228,8 +1228,25 @@ int main (int argc, char* argv[]) {
             entrypoints[entry_count++] = 0;
         }
 
+        // DEBUG entry_points from public_symbols
+        printf("Debug: public_symbols_number = %d\n", bf->public_symbols_number);
+        for (int i = 0; i < bf->public_symbols_number; i++) {
+            int offset = get_public_offset(bf, i);
+            printf("Debug: public[%d] offset = %d (0x%x)\n", i, offset, offset);
+        }
+
         uint32_t code_size = (uint32_t)(code_stop_ptr - bf->code_ptr + 1);
+
         const uint8_t* code = (const uint8_t*)bf->code_ptr;
+
+        // DEBUG code_size and code
+        printf("Debug: code_size = %u bytes\n", code_size);
+        printf("Debug: code starts at offset %ld from file start\n", bf->code_ptr - bf->buffer);
+        printf("Debug: first 20 bytes of code:\n");
+        for (int i = 0; i < 20 && i < code_size; i++) {
+            printf("%02x ", code[i]);
+        }
+        printf("\n");
 
         // Проверяем, что размер корректен
         if (code_size == 0) {
@@ -1240,6 +1257,14 @@ int main (int argc, char* argv[]) {
 
         printf("=== Idiom frequency analysis ===\n");
         printf("Total idioms found: %u\n", idioms.count);
+        printf("\n");
+
+        // После получения code и code_size
+        printf("Full code dump (%u bytes):\n", code_size);
+        for (uint32_t i = 0; i < code_size; i++) {
+            printf("%02x ", code[i]);
+            if ((i + 1) % 16 == 0) printf("\n");
+        }
         printf("\n");
 
         for (uint32_t i = 0; i < idioms.count; i++) {

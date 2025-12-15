@@ -12,6 +12,8 @@ typedef enum {
     DECODE_ILLEGAL_OP
 } DecodeError;
 
+uint16_t get_parametrized_word(uint16_t instr_word);
+
 // Результат декодирования (вариантный тип)
 typedef struct {
     enum { RESULT_START, RESULT_END, RESULT_IMM32, RESULT_VARSPEC, RESULT_ERROR } type;
