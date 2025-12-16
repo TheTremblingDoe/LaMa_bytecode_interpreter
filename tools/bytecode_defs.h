@@ -3,10 +3,10 @@
 
 /* Структура bytefile должна быть ОДИНАКОВОЙ в интерпретаторе и верификаторе */
 typedef struct bytefile {
-    char *string_ptr;              /* A pointer to the beginning of the string table */
-    int  *public_ptr;              /* A pointer to the beginning of publics table    */
-    char *code_ptr;                /* A pointer to the bytecode itself               */
-    int  *global_ptr;              /* A pointer to the global area                   */
+    const char *string_ptr;              /* A pointer to the beginning of the string table */
+    const int  *public_ptr;              /* A pointer to the beginning of publics table    */
+    const char *code_ptr;                /* A pointer to the bytecode itself               */
+    //int  *global_ptr;              /* A pointer to the global area                   */
     int   stringtab_size;          /* The size (in bytes) of the string table        */
     int   global_area_size;        /* The size (in words) of global area             */
     int   public_symbols_number;   /* The number of public symbols                   */

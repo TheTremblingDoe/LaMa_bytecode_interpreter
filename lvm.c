@@ -25,17 +25,52 @@
 
 //#define DEBUG
 
+/* Макрос для ошибок в основном цикле интерпретатора (есть L и bf) */
+#define ERROR_AT(L, bf, fmt, ...) \
+    do { \
+        const lama_State *__L = (L); \
+        const bytefile *__bf = (bf); \
+        long __offset = (__L && __bf && __L->ip && __bf->code_ptr) ? \
+                       (long)(__L->ip - __bf->code_ptr - 1) : -1; \
+        if (__offset >= 0) { \
+            failure("ERROR at offset %ld (0x%lx): " fmt, \
+                   __offset, __offset, ##__VA_ARGS__); \
+        } else { \
+            failure("ERROR: " fmt, ##__VA_ARGS__); \
+        } \
+    } while(0)
+
+/* Макрос для ошибок при проверке кода (только ip и bf) */
+#define ERROR_AT_IP(ip, bf, fmt, ...) \
+    do { \
+        const char *__ip = (ip); \
+        const bytefile *__bf = (bf); \
+        long __offset = (__ip && __bf && __bf->code_ptr) ? \
+                       (long)(__ip - __bf->code_ptr - 1) : -1; \
+        if (__offset >= 0) { \
+            failure("ERROR at offset %ld (0x%lx): " fmt, \
+                   __offset, __offset, ##__VA_ARGS__); \
+        } else { \
+            failure("ERROR: " fmt, ##__VA_ARGS__); \
+        } \
+    } while(0)
+
+/* Макрос для невалидных опкодов */
+#define OPFAIL(L, bf, fmt, ...) \
+    ERROR_AT((L), (bf), "invalid opcode %d-%d: " fmt, \
+            (int)h, (int)l, ##__VA_ARGS__)
+
 void *__start_custom_data;
 void *__stop_custom_data;
 
-char *code_stop_ptr;
+static char *code_stop_ptr;
 
 extern size_t __gc_stack_top, __gc_stack_bottom;
 //extern void __gc_root_scan_stack();
 
 /* Forward declarations */
 static void vfailure(char *s, va_list args);
-void failure(char *s, ...);
+static void failure(char *s, ...);
 
 /* The unpacked representation of bytecode file */
 //typedef struct {
@@ -49,25 +84,37 @@ void failure(char *s, ...);
 //    char  buffer[0];
 //} bytefile;
 
-/* Gets a string from a string table by an index */
-char* get_string (bytefile *f, int pos) {
+static const char* get_string_at(const bytefile *f, int pos, const char *ip) {
     if (pos < 0 || pos >= f->stringtab_size) {
-        failure("String index out of bounds: %d (stringtab_size: %d)\n", pos, f->stringtab_size);
+        if (ip && f->code_ptr) {
+            long offset = ip - f->code_ptr - 1;
+            failure("String index out of bounds at offset %ld (0x%lx): "
+                   "pos=%d, stringtab_size=%d\n",
+                   offset, offset, pos, f->stringtab_size);
+        } else {
+            failure("String index out of bounds: pos=%d, stringtab_size=%d\n",
+                   pos, f->stringtab_size);
+        }
     }
-    return &f->string_ptr[pos];
+    return (const char*)&f->string_ptr[pos];
+}
+
+/* Gets a string from a string table by an index */
+const char* get_string (const bytefile *f, int pos) {
+    return get_string_at(f, pos, NULL);
 }
 
 /* Gets a name for a public symbol */
-char* get_public_name (bytefile *f, int i) {
+const char* get_public_name (const bytefile *f, int i) {
     if (i < 0 || i >= f->public_symbols_number) {
         failure("Public symbol index out of bounds: %d (public_symbols_number: %d)\n",
                 i, f->public_symbols_number);
     }
-    return get_string (f, f->public_ptr[i*2]);
+    return get_string_at(f, f->public_ptr[i*2], NULL);
 }
 
 /* Gets an offset for a public symbol */
-int get_public_offset (bytefile *f, int i) {
+int get_public_offset (const bytefile *f, int i) {
     if (i < 0 || i >= f->public_symbols_number) {
         failure("Public symbol index out of bounds: %d (public_symbols_number: %d)\n",
                 i, f->public_symbols_number);
@@ -81,7 +128,7 @@ static void vfailure (char *s, va_list args) {
     exit(255);
 }
 
-void failure (char *s, ...) {
+static void failure (char *s, ...) {
     va_list args;
     va_start(args, s);
     vfailure(s, args);
@@ -89,7 +136,7 @@ void failure (char *s, ...) {
 }
 
 /* Reads a binary bytecode file by name and unpacks it */
-bytefile* read_file (char *fname) {
+static bytefile* read_file (const char *fname) {
     FILE *f = fopen (fname, "rb");
     long size;
     bytefile *file;
@@ -144,8 +191,8 @@ bytefile* read_file (char *fname) {
         failure("Public symbols table exceeds file bounds\n");
     }
 
-    file->public_ptr = (int*) file->buffer;
-    file->string_ptr = &file->buffer[public_table_size];
+    file->public_ptr = (const int*) file->buffer;
+    file->string_ptr = (const char*)&file->buffer[public_table_size];
 
     // Проверка string_ptr
     if (file->string_ptr + file->stringtab_size > buffer_end) {
@@ -153,7 +200,7 @@ bytefile* read_file (char *fname) {
         failure("String table exceeds file bounds\n");
     }
 
-    file->code_ptr = &file->string_ptr[file->stringtab_size];
+    file->code_ptr = (const char*)&file->string_ptr[file->stringtab_size];
 
     // Проверка code_ptr
     if (file->code_ptr > buffer_end) {
@@ -162,7 +209,7 @@ bytefile* read_file (char *fname) {
     }
 
     /* ВАЖНО: сохраняем оригинальную логику вычисления code_stop_ptr */
-    code_stop_ptr = file->buffer + (size - 3 * sizeof(int)) - 1;
+    code_stop_ptr = (const char*)(file->buffer + (size - 3 * sizeof(int)) - 1);
 
     // Дополнительная проверка code_stop_ptr
     if (code_stop_ptr < file->buffer || code_stop_ptr >= (char*)file + buffer_size) {
@@ -170,11 +217,11 @@ bytefile* read_file (char *fname) {
         failure("Invalid code_stop_ptr calculation\n");
     }
 
-    file->global_ptr = (int*) malloc (file->global_area_size * sizeof (int));
+    /* file->global_ptr = (int*) malloc (file->global_area_size * sizeof (int));
     if (file->global_ptr == NULL && file->global_area_size > 0) {
         free(file);
         failure ("*** FAILURE: unable to allocate memory for globals.\n");
-    }
+    } */
 
     return file;
 }
@@ -192,13 +239,13 @@ typedef void** StkId;
 typedef struct Lama_CallInfo {
     int n_args, n_locs, n_caps;
     StkId base;
-    char *ret_ip;
+    const char *ret_ip;
 } lama_CallInfo;
 
 typedef struct Lama_State {
-    char *ip;
-    char *code_start;
-    char *code_end;  /* Первый байт ПОСЛЕ конца кода */
+    const char *ip;
+    const char *code_start;
+    const char *code_end;  /* Первый байт ПОСЛЕ конца кода */
     StkId base;
     StkId stack_last;
     lama_CallInfo *base_ci;
@@ -209,7 +256,7 @@ typedef struct Lama_State {
     int n_globals;
 } lama_State;
 
-lama_State eval_state;
+static lama_State eval_state;
 
 #define ttisnumber(o)(UNBOXED(o))
 #define ttisstring(o)(!UNBOXED(o)&&TAG(TO_DATA(o)->tag)==STRING_TAG)
@@ -287,18 +334,16 @@ static void lama_growstack(lama_State *L, int n) {
 #define lama_numsub(a,b)((a)-(b))
 #define lama_nummul(a,b)((a)*(b))
 
-static int safe_div(lama_State *L, bytefile *bf, int a, int b) {
+static int safe_div(lama_State *L, const bytefile *bf, int a, int b) {
     if (b == 0) {
-            failure("Division by zero at offset %ld: %d / %d\n",
-                   (long)(L->ip - bf->code_ptr - 1), a, b);
+        ERROR_AT(L, bf, "Division by zero: %d / %d\n", a, b);
     }
     return a / b;
 }
 
-static int safe_mod(lama_State *L, bytefile *bf, int a, int b) {
+static int safe_mod(lama_State *L, const bytefile *bf, int a, int b) {
     if (b == 0) {
-            failure("Modulo by zero at offset %ld: %d %% %d\n",
-                   (long)(L->ip - bf->code_ptr - 1), a, b);
+        ERROR_AT(L, bf, "Modulo by zero: %d %% %d\n", a, b);
     }
 
     int result = a % b;
@@ -321,40 +366,49 @@ static int safe_mod(lama_State *L, bytefile *bf, int a, int b) {
 
 #define FAIL check(false)
 
+/* lama_pop_n - удаление n элементов с вершины стека (n > 0) */
+static void lama_pop_n(lama_State *L, int n) {
+    /* Только проверка underflow (отрицательный idx в старой схеме) */
+    if (n > (L->base - stack_top)) {
+        failure("Stack underflow: trying to pop %d, available %ld\n",
+               n, (long)(L->base - stack_top));
+    }
+    set_gc_ptr(__gc_stack_top, stack_top + n);
+}
+
+/* lama_settop - установка позиции стека (idx >= 0, увеличение стека) */
 static void lama_settop(lama_State *L, int idx) {
-    if(idx < 0) {
-        if (-idx > (L->base - stack_top)) {
-            failure("Stack underflow in lama_settop: idx=%d, available=%ld\n",
-                   idx, (long)(L->base - stack_top));
-        }
-    } else {
-        if (idx > (stack_top - L->stack_last)) {
-            failure("Stack overflow in lama_settop: idx=%d, available=%ld\n",
-                   idx, (long)(stack_top - L->stack_last));
-        }
+    /* Только проверка overflow (idx положительный или 0) */
+    if (idx > (stack_top - L->stack_last)) {
+        failure("Stack overflow in lama_settop: idx=%d, available=%ld\n",
+               idx, (long)(stack_top - L->stack_last));
     }
     set_gc_ptr(__gc_stack_top, stack_top - idx);
 }
 
-#define lama_pop(L,n)lama_settop(L,-(n))
+//#define lama_pop(L,n)lama_settop(L,-(n))
+#define lama_pop(L,n) lama_pop_n(L, n)
 
-static void check_ip_bounds(lama_State *L, size_t bytes_to_read) {
+static void check_ip_bounds(const lama_State *L, size_t bytes_to_read, const bytefile *bf) {
     /* Изменено: проверяем, что ip + bytes_to_read не выходит за code_end */
     /* code_end указывает на ПЕРВЫЙ байт ПОСЛЕ конца кода */
     if (L->ip + bytes_to_read > L->code_end) {
-        failure("Bytecode read out of bounds: ip=%p, bytes=%zu, code_end=%p (last valid byte at %p)\n",
-               L->ip, bytes_to_read, L->code_end, L->code_end - 1);
+        ERROR_AT_IP(L->ip, bf,
+                   "Bytecode read out of bounds: ip=%p, bytes=%zu, code_end=%p (last valid byte at %p)\n"
+                   "Current instruction likely at offset %ld\n",
+                   (void*)L->ip, bytes_to_read, (void*)L->code_end, (void*)(L->code_end - 1),
+                   (long)(L->ip - bf->code_ptr - 1));
     }
 }
 
-static int read_int(lama_State *L) {
-    check_ip_bounds(L, sizeof(int));
+static int read_int(lama_State *L, const bytefile *bf) {
+    check_ip_bounds(L, sizeof(int), bf);
     L->ip += sizeof(int);
-    return *(int*)(L->ip - sizeof(int));
+    return *(const int*)(L->ip - sizeof(int));
 }
 
-static unsigned char read_byte(lama_State *L) {
-    check_ip_bounds(L, 1);
+static unsigned char read_byte(lama_State *L, const bytefile *bf) {
+    check_ip_bounds(L, 1, bf);
     return (unsigned char)*L->ip++;
 }
 
@@ -374,12 +428,13 @@ static void check_loc_bounds(lama_State *L, int idx, int max, const char *loc_ty
     }
 }
 
-static void **loc2adr(lama_State *L, lama_Loc loc) {
+static void **loc2adr(lama_State *L, lama_Loc loc, const bytefile *bf) {
     int idx = loc.idx;
 
     // Быстрая проверка
     if (idx < 0) {
-        goto bounds_error;
+        ERROR_AT(L, bf, "Negative index for location type %d: %d\n",
+                loc.tt, idx);
     }
 
     int n_caps = L->ci->n_caps;
@@ -417,7 +472,8 @@ static void **loc2adr(lama_State *L, lama_Loc loc) {
             offset = n_caps + n_args + n_locs + 1 - idx;
             break;
         default:
-            failure("INTERNAL: Invalid location type %d\n"
+            ERROR_AT(L, bf,
+                    "INTERNAL: Invalid location type %d\n"
                     "Valid: LOC_G=0, LOC_L=1, LOC_A=2, LOC_C=3\n"
                     "This is likely a bytecode corruption\n",
                     loc.tt);
@@ -425,8 +481,8 @@ static void **loc2adr(lama_State *L, lama_Loc loc) {
     }
 
     if (idx >= max) {
-        bounds_error:
-        failure("Bounds error accessing %s[%d]\n"
+        ERROR_AT(L, bf,
+                "Bounds error accessing %s[%d]\n"
                 "  Maximum allowed: %d\n"
                 "  Current frame layout:\n"
                 "    [stack_bottom] Globals (%d total)\n"
@@ -451,16 +507,16 @@ static void **loc2adr(lama_State *L, lama_Loc loc) {
     return base_ptr + offset;
 }
 
-static int lama_tonumber(lama_State *L, int idx) {
+static int lama_tonumber(lama_State *L, int idx, const bytefile *bf) {
     void *o = *idx2StkId(L, idx);
     if(!UNBOXED(o)) {
-        char *type_desc = "boxed value";
+        const char *type_desc = "boxed value";
         if (ttisstring(o)) type_desc = "string";
         else if (ttisarray(o)) type_desc = "array";
         else if (ttissexp(o)) type_desc = "sexp";
         else if (ttisfunction(o)) type_desc = "function";
 
-        failure("Expected number at stack[%d], got %s (address: %p)\n",
+        ERROR_AT(L, bf, "Expected number at stack[%d], got %s (address: %p)\n",
                 idx, type_desc, o);
     }
     return UNBOX(o);
@@ -510,7 +566,7 @@ static void lama_growCI(lama_State *L, int n) {
 #define print_debug(...) (void)0
 #endif
 
-void printstack(lama_State *L) {
+static void printstack(const lama_State *L) {
     printf("stack\n");
     for (int i = 0; i < L->base - stack_top; i++) {
         int idx = L->base - stack_top - i;
@@ -530,11 +586,11 @@ void printstack(lama_State *L) {
     printf("\n");
 }
 
-void printglobals(lama_State *L) {
+static void printglobals(const lama_State *L, const bytefile *bf) {
     printf("globals\n");
     for (int i = 0; i < L->n_globals; i++) {
         lama_Loc loc = {i, LOC_G};
-        void *d = *loc2adr(L, loc);
+        void *d = *loc2adr(L, loc, bf);
         if(ttisnumber(d))
             printf("(int)");
         else if(ttissexp(d))
@@ -550,11 +606,11 @@ void printglobals(lama_State *L) {
     printf("\n");
 }
 
-void printlocals(lama_State *L) {
+static void printlocals(const lama_State *L, const bytefile *bf) {
     printf("locals\n");
     for (int i = 0; i < L->ci->n_locs; i++) {
         lama_Loc loc = {i, LOC_L};
-        void *d = *loc2adr(L, loc);
+        void *d = *loc2adr(L, loc, bf);
         if(ttisnumber(d))
             printf("(int)");
         else if(ttissexp(d))
@@ -570,11 +626,11 @@ void printlocals(lama_State *L) {
     printf("\n");
 }
 
-void printargs(lama_State *L) {
+static void printargs(const lama_State *L, const bytefile *bf) {
     printf("args\n");
     for (int i = 0; i < L->ci->n_args; i++) {
         lama_Loc loc = {i, LOC_A};
-        void *d = *loc2adr(L, loc);
+        void *d = *loc2adr(L, loc, bf);
         if(ttisnumber(d))
             printf("(int)");
         else if(ttissexp(d))
@@ -597,7 +653,7 @@ void printargs(lama_State *L) {
 #define printargs(l) (void)0
 #endif
 
-static void lama_begin(lama_State *L, int n_caps, int n_args, int n_locs, char *retip, void *fun) {
+static void lama_begin(lama_State *L, int n_caps, int n_args, int n_locs, char *retip, void *fun, const bytefile *bf) {
     inc_ci(L)
     lama_CallInfo *ci = L->ci;
     ci->ret_ip = retip;
@@ -616,15 +672,15 @@ static void lama_begin(lama_State *L, int n_caps, int n_args, int n_locs, char *
 
     for(int i = 0; i < n_caps; i++) {
         lama_Loc loc = {i, LOC_C};
-        *loc2adr(L, loc) = cast(void**, fun)[i + 1];
+        *loc2adr(L, loc, bf) = cast(void**, fun)[i + 1];
     }
     for(int i = 0; i < n_locs; i++) {
         lama_Loc loc = {i, LOC_L};
-        *loc2adr(L, loc) = cast(void*, 1);
+        *loc2adr(L, loc, bf) = cast(void*, 1);
     }
 }
 
-static void lama_end(lama_State *L) {
+static void lama_end(lama_State *L, const bytefile *bf) {
     void *ret = *idx2StkId(L, 1);
     int n_caps = L->ci->n_caps;
     int n_args = L->ci->n_args;
@@ -638,7 +694,7 @@ static void lama_end(lama_State *L) {
     void *fun = *(L->base + (n_caps + n_locs + 1));
     for(int i = 0; i < n_caps; i++) {
         lama_Loc loc = {i, LOC_C};
-        cast(void**, fun)[i + 1] = *loc2adr(L, loc);
+        cast(void**, fun)[i + 1] = *loc2adr(L, loc, bf);
     }
 
     set_gc_ptr(__gc_stack_top, stack_top + (n_caps + n_args + n_locs + 2));
@@ -650,7 +706,7 @@ static void lama_end(lama_State *L) {
 }
 
 /* Найти точку входа main в таблице публичных символов */
-static char* find_main_entrypoint(bytefile *bf) {
+static const char* find_main_entrypoint(const bytefile *bf) {
     if (bf->public_symbols_number == 0) {
         failure("No public symbols in bytecode file\n");
     }
@@ -684,7 +740,7 @@ static char* find_main_entrypoint(bytefile *bf) {
     return NULL;
 }
 
-static void check_jump_offset(lama_State *L, int offset) {
+static void check_jump_offset(const lama_State *L, int offset) {
     /* code_start + offset должен указывать внутрь кода (до code_end) */
     if (offset < 0 || L->code_start + offset >= L->code_end) {
         failure("Invalid jump offset: %d (code range: %p-%p, last valid at %p)\n",
@@ -692,7 +748,7 @@ static void check_jump_offset(lama_State *L, int offset) {
     }
 }
 
-void eval (bytefile *bf, char *fname) {
+void eval (const bytefile *bf, const char *fname) {
    lama_State *L = &eval_state;
    L->ip = find_main_entrypoint(bf);  // Начинаем с main
    L->code_start = bf->code_ptr;
@@ -744,15 +800,15 @@ void eval (bytefile *bf, char *fname) {
 
    for(int i = 0; i < L->n_globals; i++) {
         lama_Loc loc = {i, LOC_G};
-        *loc2adr(L, loc) = cast(void*, 1);
+        *loc2adr(L, loc, bf) = cast(void*, 1);
    }
 
    do {
 #ifdef DEBUG
         printstack(L);
-        printglobals(L);
-        printlocals(L);
-        printargs(L);
+        printglobals(L, bf);
+        printlocals(L, bf);
+        printargs(L, bf);
         printf("=============\n");
 #endif
         /* Проверяем, не достигли ли мы конца кода перед чтением */
@@ -760,21 +816,11 @@ void eval (bytefile *bf, char *fname) {
             failure("Reached end of bytecode without stop opcode\n");
         }
 
-        check_ip_bounds(L, 1);
-        //char x = read_byte(L), h = (x & 0xF0) >> 4, l = x & 0x0F;
-        unsigned char x = read_byte(L);
+        check_ip_bounds(L, 1, bf);
+        //char x = read_byte(L, bf), h = (x & 0xF0) >> 4, l = x & 0x0F;
+        unsigned char x = read_byte(L, bf);
         unsigned char h = (x & 0xF0) >> 4;
         unsigned char l = x & 0x0F;
-
-        /* Макросы для ошибок */
-        #define ERROR_AT(fmt, ...) failure("ERROR at offset %ld (0x%lx): " fmt, \
-                                            (long)(L->ip - bf->code_ptr - 1), \
-                                            (long)(L->ip - bf->code_ptr - 1), \
-                                            ##__VA_ARGS__)
-
-        #define OPFAIL(fmt, ...) ERROR_AT("invalid opcode %d-%d: " fmt, \
-                                            (int)h, (int)l, ##__VA_ARGS__)
-
 
         switch (h) {
             case OP_HALT:
@@ -802,7 +848,7 @@ void eval (bytefile *bf, char *fname) {
                     case OP_AND:    lama_pushnumber(L, lama_numand(nb,nc)); break;
                     case OP_OR:     lama_pushnumber(L, lama_numor(nb,nc));  break;
                     default:
-                        OPFAIL("Invalid binary operation\n");
+                        OPFAIL(L, bf, "Invalid binary operation\n");
                 }
                 break;
             }
@@ -810,16 +856,16 @@ void eval (bytefile *bf, char *fname) {
                 switch (l) {
                     case PRIMARY_CONST: //CONST
                         print_debug("CONST\n");
-                        lama_pushnumber(L, read_int(L));
+                        lama_pushnumber(L, read_int(L, bf));
                         break;
                     case PRIMARY_STRING: //STRING
                         print_debug("STRING\n");
-                        lama_push(L, Bstring(get_string(bf, read_int(L))));
+                        lama_push(L, Bstring(get_string(bf, read_int(L, bf))));
                         break;
                     case PRIMARY_SEXP: { //SEXP
                         print_debug("SEXP\n");
-                        int tag = LtagHash(get_string(bf, read_int(L)));
-                        int n = read_int(L);
+                        int tag = LtagHash(get_string(bf, read_int(L, bf)));
+                        int n = read_int(L, bf);
                         void* b = LmakeSexp(BOX(n + 1), tag);
                         for (int i = 0; i < n; i++)
                             cast(void**, b)[i] = *idx2StkId(L, n - i);
@@ -828,7 +874,7 @@ void eval (bytefile *bf, char *fname) {
                         break;
                     }
                     case PRIMARY_STI: //STI
-                        ERROR_AT("Invalid opcode: STI\n");
+                        ERROR_AT(L, bf, "Invalid opcode: STI\n");
                     case PRIMARY_STA: { //STA
                         print_debug("STA\n");
                         StkId v = *idx2StkId(L, 1);
@@ -840,17 +886,17 @@ void eval (bytefile *bf, char *fname) {
                     }
                     case PRIMARY_JMP: { //JMP
                         print_debug("JMP\n");
-                        int addr = read_int(L);
+                        int addr = read_int(L, bf);
                         check_jump_offset(L, addr);
                         L->ip = bf->code_ptr + addr;
                         break;
                     }
                     case PRIMARY_END: //END
                         print_debug("END\n");
-                        lama_end(L);
+                        lama_end(L, bf);
                         break;
                     case PRIMARY_RET: //RET
-                        ERROR_AT("Invalid opcode: RET\n");
+                        ERROR_AT(L, bf, "Invalid opcode: RET\n");
                     case PRIMARY_DROP: //DROP
                         print_debug("DROP\n");
                         lama_pop(L, 1);
@@ -873,28 +919,28 @@ void eval (bytefile *bf, char *fname) {
                         break;
                     }
                     default:
-                        OPFAIL("Invalid primary opcode\n");
+                        OPFAIL(L, bf, "Invalid primary opcode\n");
                 }
                 break;
             case OP_LD: { //LD
                 print_debug("LD");
                 unsigned char loc_type = l;
                 if (loc_type >= LOC_N) {  // LOC_N = 4
-                    ERROR_AT("Invalid location type for LD: %d (max %d)\n",
-                            loc_type, LOC_N - 1);
+                    OPFAIL(L, bf, "Invalid location type for LD: %d (max %d)\n",
+                        loc_type, LOC_N - 1);
                 }
-                lama_Loc loc = {read_int(L), (char)loc_type};  // Приведение к char
-                lama_push(L, *loc2adr(L, loc));
+                lama_Loc loc = {read_int(L, bf), (char)loc_type};  // Приведение к char
+                lama_push(L, *loc2adr(L, loc, bf));
                 break;
             }
             case OP_LDA: { //LDA
                 print_debug("LDA\n");
                 unsigned char loc_type = l;
                 if (loc_type >= LOC_N) {
-                    ERROR_AT("Invalid location type for LDA: %d\n", loc_type);
+                    ERROR_AT(L, bf, "Invalid location type for LDA: %d\n", loc_type);
                 }
-                lama_Loc loc = {read_int(L), (char)loc_type};
-                lama_push(L, loc2adr(L, loc));
+                lama_Loc loc = {read_int(L, bf), (char)loc_type};
+                lama_push(L, loc2adr(L, loc, bf));
                 lama_pushdummy(L);
                 break;
             }
@@ -902,28 +948,28 @@ void eval (bytefile *bf, char *fname) {
                 print_debug("ST\n");
                 unsigned char loc_type = l;
                 if (loc_type >= LOC_N) {
-                    ERROR_AT("Invalid location type for ST: %d\n", loc_type);
+                    ERROR_AT(L, bf, "Invalid location type for ST: %d\n", loc_type);
                 }
-                lama_Loc loc = {read_int(L), (char)loc_type};
-                *loc2adr(L, loc) = *idx2StkId(L, 1);
+                lama_Loc loc = {read_int(L, bf), (char)loc_type};
+                *loc2adr(L, loc, bf) = *idx2StkId(L, 1);
                 break;
             }
             case OP_CTRL:
                 switch (l) {
                     case CTRL_CJMPz: { //CJMPz
                         print_debug("CJMPz\n");
-                        int n = lama_tonumber(L, 1);
+                        int n = lama_tonumber(L, 1, bf);
                         lama_pop(L, 1);
-                        int addr = read_int(L);
+                        int addr = read_int(L, bf);
                         check_jump_offset(L, addr);
                         if(n == 0) L->ip = bf->code_ptr + addr;
                         break;
                     }
                     case CTRL_CJMPnz: { //CJMPnz
                         print_debug("CJMPnz\n");
-                        int n = lama_tonumber(L, 1);
+                        int n = lama_tonumber(L, 1, bf);
                         lama_pop(L, 1);
-                        int addr = read_int(L);
+                        int addr = read_int(L, bf);
                         check_jump_offset(L, addr);
                         if(n != 0) L->ip = bf->code_ptr + addr;
                         break;
@@ -933,14 +979,14 @@ void eval (bytefile *bf, char *fname) {
 
                         // Проверяем, что на стеке достаточно элементов
                         if (L->base - stack_top < 2) {
-                            ERROR_AT("BEGIN: stack underflow, need 2 values, have %ld\n",
+                            ERROR_AT(L, bf, "BEGIN: stack underflow, need 2 values, have %ld\n",
                                     (long)(L->base - stack_top));
                         }
 
-                        int n_caps = lama_tonumber(L, 2);
+                        int n_caps = lama_tonumber(L, 2, bf);
                         if (n_caps != 0) {
                             void *cap_value = *idx2StkId(L, 2);
-                            ERROR_AT("BEGIN: expected 0 captures for non-closure function, "
+                            ERROR_AT(L, bf, "BEGIN: expected 0 captures for non-closure function, "
                                     "got %d (value=%p, %s)\n",
                                     n_caps, cap_value,
                                     UNBOXED(cap_value) ? "unboxed number" : "boxed value");
@@ -958,48 +1004,48 @@ void eval (bytefile *bf, char *fname) {
                         } */
 
                         lama_pop(L, 2);
-                        int n_args = read_int(L), n_locs = read_int(L);
+                        int n_args = read_int(L, bf), n_locs = read_int(L, bf);
 
                         // Дополнительные проверки аргументов
-                        if (n_args < 0) ERROR_AT("BEGIN: negative n_args: %d\n", n_args);
-                        if (n_locs < 0) ERROR_AT("BEGIN: negative n_locs: %d\n", n_locs);
+                        if (n_args < 0) ERROR_AT(L, bf, "BEGIN: negative n_args: %d\n", n_args);
+                        if (n_locs < 0) ERROR_AT(L, bf, "BEGIN: negative n_locs: %d\n", n_locs);
 
-                        lama_begin(L, 0, n_args, n_locs, ret_ip, fun);
+                        lama_begin(L, 0, n_args, n_locs, ret_ip, fun, bf);
                         break;
                     }
                     case CTRL_CBEGIN: { //CBEGIN
                         print_debug("CBEGIN\n");
-                        int n_caps = lama_tonumber(L, 2);
+                        int n_caps = lama_tonumber(L, 2, bf);
                         void *fun = *idx2StkId(L, 1);
                         if(lama_isdummy(L, 1)) fun = NULL;
                         lama_pop(L, 2);
-                        int n_args = read_int(L), n_locs = read_int(L);
-                        lama_begin(L, n_caps, n_args, n_locs, ret_ip, fun);
+                        int n_args = read_int(L, bf), n_locs = read_int(L, bf);
+                        lama_begin(L, n_caps, n_args, n_locs, ret_ip, fun, bf);
                         break;
                     }
                     case CTRL_CLOSURE: { //CLOSURE
                         print_debug("CLOSURE\n");
-                        int func_offset = read_int(L);
+                        int func_offset = read_int(L, bf);
                         check_jump_offset(L, func_offset);
-                        int n_caps = read_int(L);
+                        int n_caps = read_int(L, bf);
                         void *fun = LMakeClosure(BOX(n_caps), bf->code_ptr + func_offset);
                         for (int i = 0; i < n_caps; i++) {
-                            //char tt = read_byte(L);
-                            unsigned char tt_byte = read_byte(L);
+                            //char tt = read_byte(L, bf);
+                            unsigned char tt_byte = read_byte(L, bf);
                             if (tt_byte >= LOC_N) {
                                 failure("Invalid location type %d\n", tt_byte);
                             }
                             char tt = (char)tt_byte;
-                            int idx = read_int(L);
+                            int idx = read_int(L, bf);
                             lama_Loc loc = {idx, tt};
-                            cast(void**, fun)[i + 1] = *loc2adr(L, loc);
+                            cast(void**, fun)[i + 1] = *loc2adr(L, loc, bf);
                         }
                         lama_push(L, fun);
                         break;
                     }
                     case CTRL_CALLC: {
                         print_debug("CALLC\n");
-                        int n_args = read_int(L);
+                        int n_args = read_int(L, bf);
                         void *fun = *idx2StkId(L, n_args + 1);
 
                         /* Улучшенная проверка функции */
@@ -1010,7 +1056,7 @@ void eval (bytefile *bf, char *fname) {
                             else if (ttisarray(fun)) type = "array";
                             else if (ttissexp(fun)) type = "sexp";
 
-                            ERROR_AT("CALLC expected function at stack position %d, got %s (value: %p)\n",
+                            ERROR_AT(L, bf, "CALLC expected function at stack position %d, got %s (value: %p)\n",
                                     n_args + 1, type, fun);
                         }
 
@@ -1030,7 +1076,7 @@ void eval (bytefile *bf, char *fname) {
 
                         if (func_h != OP_CTRL ||
                             (func_l != CTRL_BEGIN && func_l != CTRL_CBEGIN)) {
-                            ERROR_AT("Invalid function pointer in CALLC: opcode %d-%d (0x%02x) at %p, "
+                            ERROR_AT(L, bf, "Invalid function pointer in CALLC: opcode %d-%d (0x%02x) at %p, "
                                     "expected %d-{%d,%d}\n",
                                     func_h, func_l, first_byte, func_ptr,
                                     OP_CTRL, CTRL_BEGIN, CTRL_CBEGIN);
@@ -1041,9 +1087,9 @@ void eval (bytefile *bf, char *fname) {
                     }
                     case CTRL_CALL: { //CALL
                         print_debug("CALL\n");
-                        int func_offset = read_int(L);
+                        int func_offset = read_int(L, bf);
                         check_jump_offset(L, func_offset);
-                        int n_args = read_int(L);
+                        int n_args = read_int(L, bf);
                         char *func_ptr = bf->code_ptr + func_offset;
 
                         /* Улучшенная проверка указателя функции */
@@ -1053,7 +1099,7 @@ void eval (bytefile *bf, char *fname) {
 
                         if (func_h != OP_CTRL ||
                             (func_l != CTRL_BEGIN && func_l != CTRL_CBEGIN)) {
-                            ERROR_AT("Invalid function pointer in CALL at offset %d: "
+                            ERROR_AT(L, bf, "Invalid function pointer in CALL at offset %d: "
                                     "opcode %d-%d (0x%02x) at %p, expected %d-{%d,%d}\n",
                                     func_offset, func_h, func_l, first_byte, func_ptr,
                                     OP_CTRL, CTRL_BEGIN, CTRL_CBEGIN);
@@ -1067,32 +1113,32 @@ void eval (bytefile *bf, char *fname) {
                     }
                     case CTRL_TAG: { //TAG
                         print_debug("TAG\n");
-                        int t = LtagHash(get_string(bf, read_int(L)));
-                        int n = read_int(L);
+                        int t = LtagHash(get_string(bf, read_int(L, bf)));
+                        int n = read_int(L, bf);
                         *idx2StkId(L, 1) = cast(void*, Btag(*idx2StkId(L, 1), t, BOX(n)));
                         break;
                     }
                     case CTRL_ARRAY: { //ARRAY
                         print_debug("ARRAY\n");
-                        int n = read_int(L);
+                        int n = read_int(L, bf);
                         *idx2StkId(L, 1) = cast(void*, Barray_patt(*idx2StkId(L, 1), BOX(n)));
                         break;
                     }
                     case CTRL_FAIL: { //FAIL
                         print_debug("FAIL\n");
-                        int line = read_int(L);
-                        int col = read_int(L);
+                        int line = read_int(L, bf);
+                        int col = read_int(L, bf);
                         void *v = *idx2StkId(L, 1);
                         Bmatch_failure(v, fname, line, col);
                         exit(0);
                     }
                     case CTRL_LINE: { //LINE
-                        int line = read_int(L);
+                        int line = read_int(L, bf);
                         print_debug("LINE %d\n", line);
                         break;
                     }
                     default:
-                        OPFAIL("Invalid control opcode\n");
+                        OPFAIL(L, bf, "Invalid control opcode\n");
                 }
                 break;
             case OP_PATT: { //PATT
@@ -1121,7 +1167,7 @@ void eval (bytefile *bf, char *fname) {
                         *idx2StkId(L, 1) = cast(void*, Bclosure_tag_patt(*idx2StkId(L, 1)));
                         break;
                     default:
-                        OPFAIL("Invalid pattern opcode\n");
+                        OPFAIL(L, bf, "Invalid pattern opcode\n");
                 }
                 break;
             }
@@ -1145,7 +1191,7 @@ void eval (bytefile *bf, char *fname) {
                         break;
                     case BUILTIN_ARRAY: { //CALL Barray
                         print_debug("Barray\n");
-                        int n = read_int(L);
+                        int n = read_int(L, bf);
                         void *p = LmakeArray(BOX(n));
                         for (int i = 0; i < n; i++)
                             cast(void**, p)[i] = *idx2StkId(L, n - i);
@@ -1154,12 +1200,12 @@ void eval (bytefile *bf, char *fname) {
                         break;
                     }
                     default:
-                        OPFAIL("Invalid builtin opcode\n");
+                        OPFAIL(L, bf, "Invalid builtin opcode\n");
                 }
                 break;
             }
             default:
-                ERROR_AT("Invalid opcode prefix: %d\n", h);
+                ERROR_AT(L, bf, "Invalid opcode prefix: %d\n", h);
         }
     }
     while (true);
@@ -1196,7 +1242,7 @@ int main (int argc, char* argv[]) {
         bool ok = verbose ? verify_bytecode_verbose(bf, argv[2], code_stop_ptr) :
                            verify_bytecode(bf, argv[2], code_stop_ptr);
         
-        free(bf->global_ptr);
+        //free(bf->global_ptr);
         free(bf);
         
         return ok ? 0 : 1;
@@ -1283,14 +1329,14 @@ int main (int argc, char* argv[]) {
 
         free_idiom_list(&idioms);
         free(all_entrypoints);
-        free(bf->global_ptr);
+        //free(bf->global_ptr);
         free(bf);
         return 0;
     }
 
     bytefile *f = read_file (argv[1]);
     eval (f, argv[1]);
-    free(f->global_ptr);
+    //free(f->global_ptr);
     free(f);
     return 0;
 }

@@ -698,7 +698,7 @@ bool verify_control_flow(VerifierContext *ctx) {
             }
         } else if (stack_effect < 0) {
             // PUSH values
-            new_height = current_height - stack_effect;  // Минус на минус дает плюс
+            new_height = current_height - stack_effect; 
         } else {
             // No change
             new_height = current_height;
